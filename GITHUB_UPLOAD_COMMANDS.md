@@ -78,3 +78,11 @@ git push
 ## Files intentionally not uploaded
 
 `docs/`, `node_modules/`, `dist/`, `target/`, logs, temporary files, and editor settings are ignored or removed from this project package.
+
+# Routine code update
+
+```powershell
+git add .
+git commit -m "Update project"
+git push
+```
