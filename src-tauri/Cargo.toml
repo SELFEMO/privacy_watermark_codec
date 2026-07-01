@@ -1,0 +1,27 @@
+[package]
+name = "privacy-watermark-codec"
+version = "0.1.0"
+description = "Cross-platform invisible privacy watermark encoder and decoder"
+authors = ["Privacy Watermark Codec Contributors"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "privacy_watermark_codec_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+walkdir = "2"
+watermark-core = { path = "../crates/watermark-core" }

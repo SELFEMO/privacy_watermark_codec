@@ -1,0 +1,2 @@
+# Store the entire bundled FFmpeg vendor tree in Git LFS, including files without extensions.
+src-tauri/vendor/ffmpeg/** filter=lfs diff=lfs merge=lfs -text

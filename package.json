@@ -1,0 +1,29 @@
+{
+  "name": "privacy-watermark-codec",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "npm run ffmpeg:manifest && tauri dev",
+    "tauri:build": "node scripts/build-release.mjs nsis",
+    "tauri:build:msi": "node scripts/build-release.mjs msi",
+    "tauri:build:nsis": "node scripts/build-release.mjs nsis",
+    "ffmpeg:manifest": "node scripts/generate-ffmpeg-manifest.mjs",
+    "ffmpeg:manifest:strict": "node scripts/generate-ffmpeg-manifest.mjs --strict"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "typescript": "^5.8.0",
+    "vite": "^7.0.0",
+    "vue-tsc": "^3.0.0"
+  }
+}

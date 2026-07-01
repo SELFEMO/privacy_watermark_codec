@@ -1,0 +1,62 @@
+<template>
+  <div class="brand-mark" aria-hidden="true">
+    <svg viewBox="0 0 160 160" role="img" aria-label="Privacy Watermark Codec logo">
+      <defs>
+        <linearGradient id="frameBg" x1="15%" y1="10%" x2="85%" y2="92%">
+          <stop offset="0%" stop-color="#183764" />
+          <stop offset="55%" stop-color="#0b1931" />
+          <stop offset="100%" stop-color="#08111f" />
+        </linearGradient>
+        <linearGradient id="shieldLine" x1="18%" y1="8%" x2="84%" y2="100%">
+          <stop offset="0%" stop-color="#b7eeff" />
+          <stop offset="55%" stop-color="#6fa2ff" />
+          <stop offset="100%" stop-color="#8a79ff" />
+        </linearGradient>
+        <linearGradient id="lockBody" x1="12%" y1="8%" x2="80%" y2="100%">
+          <stop offset="0%" stop-color="#f6fcff" />
+          <stop offset="100%" stop-color="#dce9f6" />
+        </linearGradient>
+        <radialGradient id="shieldGlow" cx="50%" cy="42%" r="55%">
+          <stop offset="0%" stop-color="#79d7ff" stop-opacity="0.36" />
+          <stop offset="100%" stop-color="#79d7ff" stop-opacity="0" />
+        </radialGradient>
+        <filter id="softShadow" x="-30%" y="-30%" width="160%" height="160%">
+          <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#040c19" flood-opacity="0.45" />
+        </filter>
+        <clipPath id="shieldClip">
+          <path d="M80 22 122 40v31c0 31-17.1 51.5-42 65-24.9-13.5-42-34-42-65V40L80 22Z" />
+        </clipPath>
+      </defs>
+
+      <rect x="10" y="10" width="140" height="140" rx="34" fill="url(#frameBg)" />
+      <circle cx="80" cy="78" r="54" fill="url(#shieldGlow)" />
+
+      <g filter="url(#softShadow)">
+        <path d="M80 22 122 40v31c0 31-17.1 51.5-42 65-24.9-13.5-42-34-42-65V40L80 22Z" fill="rgba(10, 22, 43, 0.96)" stroke="rgba(176, 229, 255, 0.28)" stroke-width="3.5" />
+        <path d="M80 33 112 47v23.5c0 23-11.8 38.4-32 50.1C59.8 108.9 48 93.5 48 70.5V47L80 33Z" fill="rgba(16, 30, 52, 0.18)" stroke="url(#shieldLine)" stroke-width="5" stroke-linejoin="round" />
+      </g>
+
+      <g clip-path="url(#shieldClip)">
+        <circle cx="80" cy="86" r="34" fill="none" stroke="rgba(129, 192, 255, 0.16)" stroke-width="10" />
+        <circle cx="80" cy="86" r="34" fill="none" stroke="rgba(210, 238, 255, 0.08)" stroke-width="2" />
+
+        <rect x="55" y="56" width="9" height="9" rx="3" fill="#abebff" fill-opacity="0.92" />
+        <rect x="96" y="56" width="9" height="9" rx="3" fill="#97b9ff" fill-opacity="0.92" />
+        <rect x="55" y="101" width="9" height="9" rx="3" fill="#7fdcff" fill-opacity="0.72" />
+        <rect x="96" y="101" width="9" height="9" rx="3" fill="#8f8cff" fill-opacity="0.72" />
+
+        <path d="M67 51h26" fill="none" stroke="rgba(232, 246, 255, 0.18)" stroke-width="4" stroke-linecap="round" />
+      </g>
+
+      <g>
+        <path d="M67 67v-8.5c0-7.7 5.8-14 13-14s13 6.3 13 14V67" fill="none" stroke="url(#lockBody)" stroke-width="7" stroke-linecap="round" />
+        <rect x="58" y="67" width="44" height="44" rx="12" fill="url(#lockBody)" />
+        <rect x="64" y="73" width="32" height="32" rx="8" fill="#13254a" />
+        <circle cx="80" cy="88" r="5.4" fill="url(#lockBody)" />
+        <path d="M80 93v8.5" fill="none" stroke="url(#lockBody)" stroke-width="5.5" stroke-linecap="round" />
+      </g>
+
+      <path d="M56 40c7.5-4.4 15.5-7.8 24-10.6 8.5 2.8 16.5 6.2 24 10.6" fill="none" stroke="#ffffff" stroke-opacity="0.11" stroke-width="2" stroke-linecap="round" />
+    </svg>
+  </div>
+</template>

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Privacy Watermark Codec",
+  "version": "0.1.0",
+  "identifier": "com.privacywatermark.codec",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "category": "Utility",
+    "shortDescription": "Local image and video invisible privacy watermark encoder/decoder",
+    "longDescription": "A local-first desktop app for encrypted frequency-domain privacy watermarks and perceptual tamper detection.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./windows/installer-hooks.nsh",
+        "languages": [
+          "English",
+          "SimpChinese"
+        ],
+        "displayLanguageSelector": true,
+        "compression": "zlib"
+      }
+    },
+    "resources": [
+      "vendor/ffmpeg/manifest.json",
+      "vendor/ffmpeg/LICENSE.txt",
+      "vendor/ffmpeg/README.md",
+      "vendor/ffmpeg/VERSION.txt",
+      "vendor/ffmpeg/windows_x64/*"
+    ]
+  },
+  "mainBinaryName": "privacy-watermark-codec"
+}
