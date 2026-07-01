@@ -3,7 +3,7 @@
   "source": "Bundled FFmpeg binaries stored under src-tauri/vendor/ffmpeg. Keep upstream download URL, source URL, license files, and build notes together with this project.",
   "buildLicense": "GPL-2.0-or-later-build-check-required",
   "buildConfigure": "--prefix=/opt/homebrew/Cellar/ffmpeg/8.1.2 --enable-shared --enable-pthreads --enable-version3 --cc=clang --host-cflags= --host-ldflags= --enable-ffplay --enable-gpl --enable-libsvtav1 --enable-libopus --enable-libx264 --enable-libmp3lame --enable-libdav1d --enable-libvmaf --enable-libvpx --enable-libx265 --enable-openssl --enable-videotoolbox --enable-audiotoolbox --enable-neon",
-  "generatedAt": "2026-07-01T19:17:19.632Z",
+  "generatedAt": "2026-07-01T19:27:24.847Z",
   "platforms": {
     "windows_x64": {
       "ffmpeg": {
@@ -50,15 +50,15 @@
     "macos_x64": {
       "ffmpeg": {
         "file": "ffmpeg",
-        "sha256": ""
+        "sha256": "60725ea0467ccaf900bf294d3567c302a802dc661f03bdde6aa7ecc9ccf05c4f"
       },
       "ffprobe": {
         "file": "ffprobe",
-        "sha256": ""
+        "sha256": "a45033d0e45ede2683cee401545becd7ef1a9873ea6f640c0acf0b90f7730b67"
       },
       "ffplay": {
         "file": "ffplay",
-        "sha256": ""
+        "sha256": "70fb98d096e4bf7ad7359f1f335b2f711b8ecb67f71402421ab9573535c6b4d3"
       }
     },
     "macos_arm64": {
