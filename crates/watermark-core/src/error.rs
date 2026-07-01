@@ -16,7 +16,7 @@ pub enum CoreError {
         source: image::ImageError,
     },
 
-    #[error("图像容量不足：需要至少 {required_blocks} 个 8×8 块，当前只有 {available_blocks} 个。请缩短水印文本或使用更大分辨率的图片")]
+    #[error("图像载荷容量不足：需要至少 {required_blocks} 个可写入载荷的 8×8 块，当前只有 {available_blocks} 个。请缩短水印文本、降低分区指纹开销，或使用更高分辨率的图片/视频")]
     InsufficientCapacity {
         required_blocks: usize,
         available_blocks: usize,

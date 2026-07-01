@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     crypto::{decrypt, encrypt, NONCE_LEN, SALT_LEN},
     error::{CoreError, Result},
+    fingerprint::PartitionFingerprint,
     keyfile::WatermarkKey,
 };
 
@@ -29,6 +30,8 @@ pub struct InnerPayload {
     pub height: u32,
     pub created_at: String,
     pub media_kind: String,
+    #[serde(default)]
+    pub partition_fingerprints: Vec<PartitionFingerprint>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +41,14 @@ pub struct EncryptedBody {
 }
 
 impl InnerPayload {
-    pub fn new(text: String, fingerprint: u64, width: u32, height: u32, media_kind: &str) -> Self {
+    pub fn new(
+        text: String,
+        fingerprint: u64,
+        width: u32,
+        height: u32,
+        media_kind: &str,
+        partition_fingerprints: Vec<PartitionFingerprint>,
+    ) -> Self {
         Self {
             text,
             fingerprint_hex: format!("{fingerprint:016x}"),
@@ -46,6 +56,7 @@ impl InnerPayload {
             height,
             created_at: Utc::now().to_rfc3339(),
             media_kind: media_kind.to_owned(),
+            partition_fingerprints,
         }
     }
 

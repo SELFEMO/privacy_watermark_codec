@@ -1,8 +1,12 @@
+mod cancellation;
 mod commands;
+mod evidence;
 mod ffmpeg;
 mod launch;
 mod media;
 mod models;
+mod progress;
+mod release;
 mod storage;
 mod video;
 
@@ -22,6 +26,7 @@ pub fn run() {
         .try_init();
 
     tauri::Builder::default()
+        .manage(cancellation::CancellationRegistry::default())
         .manage(launch::PendingLaunchContexts::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -67,8 +72,10 @@ pub fn run() {
             commands::encode_media,
             commands::decode_media,
             commands::scan_privacy_watermark,
+            commands::cancel_task,
             ffmpeg::get_ffmpeg_info,
-            launch::get_launch_context
+            launch::get_launch_context,
+            release::get_release_metadata
         ])
         .run(tauri::generate_context!())
         .expect("启动图隐私水印编解码器失败");

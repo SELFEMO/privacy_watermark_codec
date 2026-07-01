@@ -2,183 +2,204 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Privacy Watermark Codec is a local-first desktop app built with Tauri, Vue, and Rust. It embeds encrypted invisible privacy watermarks into images and videos, extracts watermarks with a key/password, performs perceptual tamper detection, and scans unknown images for likely privacy/AI watermark traces.
+Privacy Watermark Codec is a local desktop app built with Tauri, Vue, and Rust. It embeds encrypted invisible privacy watermarks into images and videos, extracts watermark text with a `.key` file or the original custom password, and reports likely media tampering.
 
-## AI development notice
+The goal is not to add visible marks to images. The app embeds encrypted information into image frequency data while preserving visual quality, so it can be used for ownership claims, content tracing, and tamper inspection.
 
-This project was implemented with AI-assisted programming. Before public release or production use, review the code, test the target platforms, verify the watermark behavior with your own sample set, and confirm all third-party binary licenses.
+## Features
 
-## Feature summary
-
-- Single-image and batch-image watermark encoding.
-- Video frame-by-frame encoding and decoding through bundled FFmpeg.
+- Single-image, batch-image, and video watermark encoding.
+- Image and video watermark decoding.
 - Independent key, shared batch key, and custom-password key modes.
-- PBKDF2-HMAC-SHA256 key derivation and ChaCha20-Poly1305 authenticated encryption.
-- DCT mid-frequency watermark embedding, Hamming error correction, and repeated spatial voting.
-- Perceptual fingerprint reporting for likely tamper status.
-- Unknown-image scan for this project watermark headers and common privacy/AI metadata traces.
+- PBKDF2-HMAC-SHA256 key derivation and ChaCha20-Poly1305 encrypted payloads.
+- DCT mid-frequency embedding, BCH error correction, synchronization-template assisted registration, and repeated spatial voting.
+- Global and partitioned perceptual fingerprint reporting for likely tamper status and suspicious-region localization.
+- Unknown-image scan for project watermark headers and common privacy/AI metadata traces.
 - Local-only processing. Media, passwords, and key files are not uploaded.
 - Chinese and English UI.
-- Windows image right-click menu integration with a single grouped submenu.
+- Grouped Windows image right-click menu entries.
 
-## Current validation status
+## Clone or download
 
-| Platform | Packaging status | Notes |
-| --- | --- | --- |
-| Windows x64 | Default target | Main development and packaging path. NSIS installer is the default. |
-| Windows ARM64 | Prepared but not tested | Directory and manifest structure are present. Requires ARM64 FFmpeg binaries and platform testing. |
-| macOS ARM64 | Prepared but not tested | Requires macOS machine, executable permissions on FFmpeg files, signing/notarization decisions, and platform testing. |
-| macOS x64 | Prepared but not tested | Requires Intel macOS build environment or suitable runner. Not verified. |
-| Linux x64 | Prepared but not tested | Requires Linux Tauri system dependencies and Linux FFmpeg binaries. Not verified. |
-| Linux ARM64 | Prepared but not tested | Requires ARM64 Linux build environment and FFmpeg binaries. Not verified. |
+Recommended clone flow:
 
-Only Windows x64 should be treated as the current verified packaging target. Other platforms have directory conventions and operation notes, but they are not release-certified.
+```text
+git clone https://github.com/SELFEMO/privacy_watermark_codec.git
+cd privacy_watermark_codec
+```
 
-## FFmpeg vendor layout
+If you only need to inspect the source code, GitHub **Code > Download ZIP** can also be used. However, GitHub source ZIP archives may not include large Git LFS objects, so they should not be treated as complete build-ready packages.
 
-This repository is designed to keep bundled FFmpeg files under:
+If FFmpeg binaries in the repository are managed by Git LFS, run these commands after cloning:
+
+```text
+git lfs install
+git lfs pull
+```
+
+These Git commands are the same on Windows, macOS, and Linux. Only the local project path differs, such as `D:\MyWorkstation\Learning\Rust\privacy_watermark_codec` on Windows or `~/Learning/Rust/privacy_watermark_codec` on macOS/Linux.
+
+## Prepare FFmpeg files
+
+Video encoding and decoding require `ffmpeg` and `ffprobe`. The project reads bundled FFmpeg files from:
 
 ```text
 src-tauri/vendor/ffmpeg/
-├─ LICENSE.txt
-├─ README.md
-├─ VERSION.txt
-├─ manifest.json
-├─ windows_x64/
-├─ windows_arm64/
-├─ macos_arm64/
-├─ macos_x64/
-├─ linux_x64/
-├─ linux_amd64/
-└─ linux_arm64/
 ```
 
-Expected runtime files:
+You can use the FFmpeg files already uploaded with the repository, or you can download or build FFmpeg yourself and place the files into the expected directory. The official FFmpeg website is `https://ffmpeg.org/`, and the official download page is `https://ffmpeg.org/download.html`. The official download page mainly provides source code and links to compiled package providers. Windows users can choose a compiled build from the providers listed on that page.
+
+Minimum required files:
 
 ```text
-windows_x64/ffmpeg.exe
-windows_x64/ffprobe.exe
+src-tauri/vendor/ffmpeg/windows_x64/ffmpeg.exe
+src-tauri/vendor/ffmpeg/windows_x64/ffprobe.exe
 
-windows_arm64/ffmpeg.exe
-windows_arm64/ffprobe.exe
+src-tauri/vendor/ffmpeg/windows_arm64/ffmpeg.exe
+src-tauri/vendor/ffmpeg/windows_arm64/ffprobe.exe
 
-macos_arm64/ffmpeg
-macos_arm64/ffprobe
+src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg
+src-tauri/vendor/ffmpeg/macos_arm64/ffprobe
 
-macos_x64/ffmpeg
-macos_x64/ffprobe
+src-tauri/vendor/ffmpeg/macos_x64/ffmpeg
+src-tauri/vendor/ffmpeg/macos_x64/ffprobe
 
-linux_x64/ffmpeg
-linux_x64/ffprobe
+src-tauri/vendor/ffmpeg/linux_x64/ffmpeg
+src-tauri/vendor/ffmpeg/linux_x64/ffprobe
 
-linux_arm64/ffmpeg
-linux_arm64/ffprobe
+src-tauri/vendor/ffmpeg/linux_arm64/ffmpeg
+src-tauri/vendor/ffmpeg/linux_arm64/ffprobe
 ```
 
-`ffplay` is optional. If present, it is listed on the FFmpeg information page but is not required for encoding or decoding.
+`ffplay` is optional and is not required for watermark encoding or decoding.
 
-After copying or replacing binaries, refresh the manifest:
+After copying or replacing FFmpeg files, refresh the FFmpeg manifest from the project root:
 
-```bash
+```text
 npm run ffmpeg:manifest
 ```
 
-For macOS and Linux, make runtime files executable before packaging:
+On macOS and Linux, make runtime files executable before packaging. Replace the platform directory with the one you actually use:
 
-```bash
+```text
 chmod +x src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg src-tauri/vendor/ffmpeg/macos_arm64/ffprobe
 chmod +x src-tauri/vendor/ffmpeg/linux_x64/ffmpeg src-tauri/vendor/ffmpeg/linux_x64/ffprobe
 ```
 
-Adjust the directory names to the platform you are building.
+## When Git LFS does not restore all FFmpeg files
 
-## Windows x64 build
+If you are sure the FFmpeg files exist in GitHub LFS but `git lfs pull` or `git lfs fetch --all` still leaves local files incomplete, handle it in this order.
 
-Install dependencies:
+First, check whether local LFS include/exclude filters are active. Those filters can download only part of the paths:
 
-```bash
+```text
+git config --show-origin --get-regexp "lfs\.(fetchinclude|fetchexclude)"
+```
+
+If the command prints `lfs.fetchinclude` or `lfs.fetchexclude`, remove repository and global filters:
+
+```text
+git config --local --unset-all lfs.fetchinclude
+git config --local --unset-all lfs.fetchexclude
+git config --global --unset-all lfs.fetchinclude
+git config --global --unset-all lfs.fetchexclude
+```
+
+If one line says the key does not exist, ignore it and continue.
+
+Second, fetch only the FFmpeg directory and explicitly check cached LFS objects out into the working tree:
+
+```text
+git lfs install --force
+git lfs fetch origin main --include="src-tauri/vendor/ffmpeg/**" --exclude=""
+git lfs checkout
+git lfs pull origin main --include="src-tauri/vendor/ffmpeg/**" --exclude=""
+```
+
+The important command is `git lfs checkout`. `git lfs fetch --all` downloads objects into the local LFS cache, but it does not always replace pointer text files in the working tree. `git lfs checkout` writes the real binaries from the local LFS cache back into the working tree.
+
+Third, check whether the working tree still contains pointer files. Real `ffmpeg.exe` or `ffmpeg` files are normally not tiny text files:
+
+```text
+git lfs ls-files
+```
+
+If FFmpeg entries are listed but local files are still small pointer files, run:
+
+```text
+git lfs checkout src-tauri/vendor/ffmpeg
+```
+
+If this still fails, the problem is usually not ordinary clone behavior. Common causes are: the current branch does not reference those LFS objects, the objects were not pushed to the same remote, repository LFS permission/quota problems, or local proxy/network blocking. The repository maintainer should push LFS objects again using `GITHUB_UPLOAD_COMMANDS.md`.
+
+## Install, start, and package
+
+Install frontend dependencies:
+
+```text
 npm install
 ```
 
-Refresh FFmpeg manifest:
+Start development mode:
 
-```bash
-npm run ffmpeg:manifest
-```
-
-Run development app:
-
-```bash
+```text
 npm run tauri:dev
 ```
 
-Build the Windows installer:
+Build installer/package:
 
-```bash
+```text
 npm run tauri:build
 ```
 
-The installer is generated under:
+The Windows NSIS installer is generated under:
 
 ```text
 target/release/bundle/nsis/
 ```
 
-The build script renames the final setup file to remove the app version segment from the installer filename.
+## Usage
 
-## Non-Windows build notes
+### Encode watermark
 
-The project includes directory conventions for macOS and Linux, but those packages have not been tested.
+1. Open the app and enter encode mode.
+2. Select image or video files.
+3. Select the output directory.
+4. Enter the watermark text.
+5. Choose independent key, shared batch key, or custom password.
+6. Start encoding.
+7. Keep the output media, `.key` file, and evidence manifest.
 
-General steps:
+### Decode watermark
 
-```bash
-npm install
-npm run ffmpeg:manifest
-cargo test -p watermark-core --release
-npm run tauri:build
-```
+1. Open the app and enter decode mode.
+2. Select encoded images or videos.
+3. Select the `.key` file or enter the original custom password.
+4. Start decoding and inspection.
+5. Review extracted watermark text, tamper status, and suspicious regions.
 
-Additional notes:
+### Scan unknown images
 
-- macOS builds should be performed on macOS. Signing and notarization are not configured in this project.
-- Linux builds require the Tauri WebKitGTK/AppIndicator/librsvg/patchelf dependencies for the target distribution.
-- Confirm that `src-tauri/tauri.conf.json` packages the FFmpeg directory for the platform you are building.
-- Re-run the full encode/decode/scan workflow on each target OS before publishing installers.
+1. Select one or more unknown images, or import them from the Windows right-click menu.
+2. Start scan.
+3. Review whether project watermark headers, privacy metadata, or AI watermark traces are found.
 
-## Git and Git LFS
+A positive project-header scan means an encrypted project watermark may be present. It does not reveal watermark text without the key/password. A negative scan result is not proof that the image is watermark-free.
 
-The FFmpeg vendor tree can exceed normal GitHub file size limits, so this project includes:
+## Current validation status
 
-```text
-.gitattributes
-```
-
-with this rule:
-
-```text
-src-tauri/vendor/ffmpeg/** filter=lfs diff=lfs merge=lfs -text
-```
-
-This tracks the entire FFmpeg vendor directory through Git LFS, including files with no extension.
-
-Use Git LFS before the first commit that adds the FFmpeg binaries:
-
-```bash
-git lfs install
-git lfs track "src-tauri/vendor/ffmpeg/**"
-git add .gitattributes
-```
-
-A full upload command sequence is provided in:
-
-```text
-GITHUB_UPLOAD_COMMANDS.md
-```
+| Platform | Current status | Notes |
+| --- | --- | --- |
+| Windows x64 | Main verified path | Main development, debugging, and packaging target. NSIS is the default installer format. |
+| Windows ARM64 | Not tested | Directory placeholder exists. Requires matching FFmpeg files and platform validation. |
+| macOS ARM64 | Not tested | Requires macOS environment, FFmpeg executable permissions, signing/notarization decisions, and validation. |
+| macOS x64 | Not tested | Requires matching build environment and platform validation. |
+| Linux x64 | Not tested | Requires Linux Tauri system dependencies, matching FFmpeg files, and platform validation. |
+| Linux ARM64 | Not tested | Requires matching build environment, matching FFmpeg files, and platform validation. |
 
 ## Runtime storage policy
 
-The app avoids using `%APPDATA%` as its own runtime data directory. Runtime data is stored beside the executable:
+The app does not use `%APPDATA%` as its own runtime data directory. Runtime data is stored beside the executable:
 
 ```text
 PrivacyWatermarkCodecData/
@@ -186,7 +207,7 @@ PrivacyWatermarkCodecData/
 └─ work/
 ```
 
-The NSIS installer tries to choose a non-system drive when possible. Uninstall removes `PrivacyWatermarkCodecData` from the install directory.
+The Windows installer tries to choose a non-system drive when possible. Uninstall removes `PrivacyWatermarkCodecData` from the install directory.
 
 ## Windows right-click menu
 
@@ -199,35 +220,11 @@ Privacy Watermark Codec
 └─ 无密钥扫描 / Keyless scan
 ```
 
-The submenu uses the app icon and supports multi-select by launching through Windows Explorer and merging files in the app's single-instance handler.
-
-## How to use
-
-### Encode
-
-1. Select images or videos.
-2. Select the output directory.
-3. Enter watermark text.
-4. Choose a key mode.
-5. Start encoding.
-
-### Decode
-
-1. Select encoded media.
-2. Select a `.key` file or enter the original custom password.
-3. Start decode and inspection.
-
-### Scan unknown images
-
-1. Select one or more unknown images, or use the right-click menu.
-2. Start scan. Right-click keyless scan starts automatically after import.
-3. Review the trace summary.
-
-A positive project-header detection means an encrypted project watermark is likely present. It does not reveal private text without the key/password. A negative scan result is not proof that the image is watermark-free.
+The submenu uses the app icon and supports multi-select. Selected files are merged into the app through the single-instance handler.
 
 ## Key file warning
 
-`.key` files contain derived decryption material. Treat them like passwords. If a key file is exposed, the watermark text protected by that key can be recovered.
+`.key` files contain derived decryption material. Treat them like password files. If a key file is exposed, the corresponding watermark text may be recovered.
 
 ## Project structure
 
@@ -244,12 +241,6 @@ privacy-watermark-codec/
 └─ .github/workflows/           Windows release workflow
 ```
 
-## Review notes
+## AI development notice
 
-The current package has been statically reviewed for obvious broken paths, stale documentation references, context-menu `%*` usage, startup FFmpeg probing, and visible command-window FFmpeg calls. Frontend type checking and production web build pass with:
-
-```bash
-npm run build
-```
-
-Rust compilation and Windows installer generation must still be verified on the target Windows machine after FFmpeg binaries are copied.
+This project was implemented with AI-assisted programming. Before public release or production use, review the code, verify watermark behavior with your own sample set, and confirm all third-party binary licenses.

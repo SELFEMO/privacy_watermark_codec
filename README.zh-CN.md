@@ -2,179 +2,200 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-图隐私水印编解码器是一个本地优先的桌面应用，基于 Tauri、Vue 和 Rust 构建，用于给图片和视频嵌入不可见加密隐私水印，支持携带密钥或密码解码、感知级篡改检测，并可对未知来源图片扫描可能存在的隐私水印或 AI 水印痕迹。
+图隐私水印编解码器是一个本地桌面应用，基于 Tauri、Vue 和 Rust 构建。它可以给图片和视频嵌入不可见的加密隐私水印，也可以在提供 `.key` 文件或原始自定义密码后提取水印内容，并报告媒体是否存在疑似篡改。
 
-## AI 编程提示
-
-本项目由 AI 辅助编程完成。正式发布或生产使用前，应由开发者复核代码、在目标平台重新测试、使用自有样本验证水印效果，并确认所有第三方二进制文件的许可证合规性。
+本项目的目标不是把图片变成可见水印图，而是在尽量不影响画面观感的前提下，将加密信息嵌入到图像频域中，用于版权声明、内容追踪和篡改辅助判断。
 
 ## 功能概览
 
-- 单张图片和批量图片水印编码。
-- 通过内置 FFmpeg 进行视频逐帧编码和逐帧解码。
-- 支持独立密钥、批次共享密钥、自定义密码三种模式。
-- 使用 PBKDF2-HMAC-SHA256 密钥派生和 ChaCha20-Poly1305 认证加密。
-- 使用 DCT 中频水印、Hamming 纠错和空间重复投票。
-- 使用感知指纹报告疑似篡改状态。
+- 支持单张图片、批量图片和视频水印编码。
+- 支持图片和视频水印解码。
+- 支持独立密钥、批次共享密钥、自定义密码三种密钥模式。
+- 使用 PBKDF2-HMAC-SHA256 派生密钥，使用 ChaCha20-Poly1305 加密水印载荷。
+- 使用 DCT 中频嵌入、BCH 纠错、同步模板辅助配准和空间重复投票提高鲁棒性。
+- 使用全局和分区感知指纹报告疑似篡改状态，并定位疑似篡改区域。
 - 支持未知图片扫描项目水印头和常见隐私/AI 元数据痕迹。
-- 所有媒体、密码、密钥均在本地处理，不上传网络。
+- 所有媒体、密码、密钥都在本地处理，不上传网络。
 - 支持中文和英文界面。
-- Windows 图片右键菜单使用统一分组子菜单，不把功能散开。
+- Windows 图片右键菜单提供统一分组入口。
 
-## 当前验证状态
+## 克隆或下载项目
 
-| 平台 | 打包状态 | 说明 |
-| --- | --- | --- |
-| Windows x64 | 默认目标 | 当前主要开发和打包路径，默认使用 NSIS 安装包。 |
-| Windows ARM64 | 已预留但未测试 | 已有目录和 manifest 结构，需要 ARM64 FFmpeg 二进制并进行平台测试。 |
-| macOS ARM64 | 已预留但未测试 | 需要 macOS 机器、FFmpeg 可执行权限、签名/公证方案和平台测试。 |
-| macOS x64 | 已预留但未测试 | 需要 Intel macOS 构建环境或对应 runner，尚未验证。 |
-| Linux x64 | 已预留但未测试 | 需要 Linux Tauri 系统依赖和 Linux FFmpeg 二进制，尚未验证。 |
-| Linux ARM64 | 已预留但未测试 | 需要 ARM64 Linux 构建环境和 FFmpeg 二进制，尚未验证。 |
+推荐使用 Git 克隆项目：
 
-目前只有 Windows x64 可视为当前验证过的主要打包目标。其他平台仅补齐目录约定和操作说明，尚不能视为正式发布包。
+```text
+git clone https://github.com/SELFEMO/privacy_watermark_codec.git
+cd privacy_watermark_codec
+```
 
-## FFmpeg 目录约定
+如果你只想查看源码，也可以使用 GitHub 页面中的 **Code > Download ZIP**。但 GitHub 的源码 ZIP 不一定包含 Git LFS 管理的大文件，因此不建议把它作为可直接构建的完整包。
 
-本项目将内置 FFmpeg 文件放在：
+如果仓库中的 FFmpeg 二进制通过 Git LFS 管理，克隆后继续执行：
+
+```text
+git lfs install
+git lfs pull
+```
+
+这些 Git 命令在 Windows、macOS、Linux 上相同。只有本地项目路径不同，例如 Windows 可能是 `D:\MyWorkstation\Learning\Rust\privacy_watermark_codec`，macOS 或 Linux 可能是 `~/Learning/Rust/privacy_watermark_codec`。
+
+## 准备 FFmpeg 文件
+
+视频编码和解码需要 `ffmpeg` 和 `ffprobe`。项目默认从下面目录读取内置 FFmpeg：
 
 ```text
 src-tauri/vendor/ffmpeg/
-├─ LICENSE.txt
-├─ README.md
-├─ VERSION.txt
-├─ manifest.json
-├─ windows_x64/
-├─ windows_arm64/
-├─ macos_arm64/
-├─ macos_x64/
-├─ linux_x64/
-├─ linux_amd64/
-└─ linux_arm64/
 ```
 
-各平台至少需要：
+你可以使用仓库中已经上传的 FFmpeg 文件，也可以自己下载或编译 FFmpeg 后放入对应目录。FFmpeg 官方网站是 `https://ffmpeg.org/`，官方下载页是 `https://ffmpeg.org/download.html`。FFmpeg 官方下载页主要提供源码和已编译包入口，Windows 用户也可以从官方下载页列出的第三方构建入口获取可执行文件。
+
+各平台至少需要放入以下文件：
 
 ```text
-windows_x64/ffmpeg.exe
-windows_x64/ffprobe.exe
+src-tauri/vendor/ffmpeg/windows_x64/ffmpeg.exe
+src-tauri/vendor/ffmpeg/windows_x64/ffprobe.exe
 
-windows_arm64/ffmpeg.exe
-windows_arm64/ffprobe.exe
+src-tauri/vendor/ffmpeg/windows_arm64/ffmpeg.exe
+src-tauri/vendor/ffmpeg/windows_arm64/ffprobe.exe
 
-macos_arm64/ffmpeg
-macos_arm64/ffprobe
+src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg
+src-tauri/vendor/ffmpeg/macos_arm64/ffprobe
 
-macos_x64/ffmpeg
-macos_x64/ffprobe
+src-tauri/vendor/ffmpeg/macos_x64/ffmpeg
+src-tauri/vendor/ffmpeg/macos_x64/ffprobe
 
-linux_x64/ffmpeg
-linux_x64/ffprobe
+src-tauri/vendor/ffmpeg/linux_x64/ffmpeg
+src-tauri/vendor/ffmpeg/linux_x64/ffprobe
 
-linux_arm64/ffmpeg
-linux_arm64/ffprobe
+src-tauri/vendor/ffmpeg/linux_arm64/ffmpeg
+src-tauri/vendor/ffmpeg/linux_arm64/ffprobe
 ```
 
-`ffplay` 是可选文件。如果存在，会显示在 FFmpeg 信息页中，但编码和解码不依赖它。
+`ffplay` 是可选文件，缺少它不会影响水印编码和解码。
 
-每次复制或替换二进制文件后，重新生成清单：
+复制或替换 FFmpeg 文件后，在项目根目录刷新 FFmpeg 清单：
 
-```bash
+```text
 npm run ffmpeg:manifest
 ```
 
-macOS 和 Linux 平台打包前，需要给运行文件加执行权限：
+macOS 和 Linux 平台还需要给可执行文件增加执行权限。下面是示例，实际目录名请按目标平台替换：
 
-```bash
+```text
 chmod +x src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg src-tauri/vendor/ffmpeg/macos_arm64/ffprobe
 chmod +x src-tauri/vendor/ffmpeg/linux_x64/ffmpeg src-tauri/vendor/ffmpeg/linux_x64/ffprobe
 ```
 
-实际使用时请把目录名替换成目标平台目录。
+## Git LFS 拉不全 FFmpeg 时的处理
 
-## Windows x64 构建
+如果你确认 GitHub 云端已经有 FFmpeg 文件，但 `git lfs pull` 或 `git lfs fetch --all` 后本地仍然不完整，优先按下面顺序处理。
 
-安装依赖：
+第一步，确认本地没有设置 LFS 下载过滤。过滤规则会导致只下载部分路径：
 
-```bash
+```text
+git config --show-origin --get-regexp "lfs\.(fetchinclude|fetchexclude)"
+```
+
+如果上面命令输出了 `lfs.fetchinclude` 或 `lfs.fetchexclude`，清理本仓库和全局过滤配置：
+
+```text
+git config --local --unset-all lfs.fetchinclude
+git config --local --unset-all lfs.fetchexclude
+git config --global --unset-all lfs.fetchinclude
+git config --global --unset-all lfs.fetchexclude
+```
+
+如果某一条提示没有该配置，可以忽略，继续执行下一条。
+
+第二步，只拉取 FFmpeg 目录，并把 LFS 缓存中的真实文件检出到工作区：
+
+```text
+git lfs install --force
+git lfs fetch origin main --include="src-tauri/vendor/ffmpeg/**" --exclude=""
+git lfs checkout
+git lfs pull origin main --include="src-tauri/vendor/ffmpeg/**" --exclude=""
+```
+
+这里的关键是 `git lfs checkout`。`git lfs fetch --all` 只是把对象下载到本地 LFS 缓存，不一定会自动替换工作区里的 pointer 文本文件；`git lfs checkout` 才会把缓存中的真实二进制写回工作区。
+
+第三步，检查本地是否仍是 pointer 文件。真实的 `ffmpeg.exe` 或 `ffmpeg` 通常不会是几百字节的小文本文件：
+
+```text
+git lfs ls-files
+```
+
+如果 `git lfs ls-files` 能看到 FFmpeg 条目，但工作区文件仍然是小文本 pointer，再执行一次：
+
+```text
+git lfs checkout src-tauri/vendor/ffmpeg
+```
+
+如果仍然失败，通常不是普通 clone 命令的问题，而是以下原因之一：当前分支没有引用这些 LFS 对象、远端 LFS 对象没有成功推送到对应远端、仓库 LFS 权限/额度异常，或本地 Git LFS 被代理/网络拦截。维护者应参考 `GITHUB_UPLOAD_COMMANDS.md` 重新推送 LFS 对象。
+
+## 安装、启动与打包
+
+安装前端依赖：
+
+```text
 npm install
 ```
 
-刷新 FFmpeg 清单：
+开发模式启动：
 
-```bash
-npm run ffmpeg:manifest
-```
-
-开发运行：
-
-```bash
+```text
 npm run tauri:dev
 ```
 
-构建 Windows 安装包：
+构建安装包：
 
-```bash
+```text
 npm run tauri:build
 ```
 
-安装包输出目录：
+Windows NSIS 安装包默认输出到：
 
 ```text
 target/release/bundle/nsis/
 ```
 
-构建脚本会在完成后把安装包文件名里的应用版本段去掉。
+## 使用教程
 
-## 非 Windows 平台说明
+### 编码水印
 
-项目已经补齐 macOS 和 Linux 的目录约定，但这些平台尚未测试。
+1. 打开软件，进入编码模式。
+2. 选择图片或视频文件。
+3. 选择输出目录。
+4. 输入需要嵌入的水印文本。
+5. 选择密钥模式：独立密钥、批次共享密钥或自定义密码。
+6. 点击开始编码。
+7. 编码完成后，保存输出媒体文件、`.key` 文件和证据清单。
 
-通用步骤：
+### 解码水印
 
-```bash
-npm install
-npm run ffmpeg:manifest
-cargo test -p watermark-core --release
-npm run tauri:build
-```
+1. 打开软件，进入解码模式。
+2. 选择已编码的图片或视频。
+3. 选择 `.key` 文件，或输入编码时使用的自定义密码。
+4. 点击开始解码与检测。
+5. 查看提取出的水印文本、篡改判断和疑似篡改区域。
 
-注意事项：
+### 扫描未知图片
 
-- macOS 安装包应在 macOS 上构建；本项目尚未配置签名和公证。
-- Linux 构建需要安装 Tauri 所需的 WebKitGTK、AppIndicator、librsvg、patchelf 等系统依赖。
-- 打包前请确认 `src-tauri/tauri.conf.json` 中的 resources 已包含目标平台的 FFmpeg 目录。
-- 每个目标系统都必须重新执行编码、解码、未知图片扫描的完整流程后，才能发布给用户。
+1. 选择一个或多个未知图片，或通过 Windows 右键菜单导入。
+2. 点击扫描。
+3. 查看是否发现项目水印头、常见隐私元数据或 AI 水印痕迹。
 
-## Git 与 Git LFS
+检测到项目水印头，只表示图片可能含有本项目加密水印；没有密钥或密码时不会显示水印正文。未检出水印也不等于图片一定没有水印。
 
-`src-tauri/vendor/ffmpeg` 目录可能超过 GitHub 普通文件大小限制，因此项目已加入：
+## 当前验证状态
 
-```text
-.gitattributes
-```
-
-其中包含：
-
-```text
-src-tauri/vendor/ffmpeg/** filter=lfs diff=lfs merge=lfs -text
-```
-
-这会让整个 FFmpeg vendor 目录通过 Git LFS 管理，包括没有扩展名的文件。
-
-在第一次提交 FFmpeg 二进制文件之前，请先执行：
-
-```bash
-git lfs install
-git lfs track "src-tauri/vendor/ffmpeg/**"
-git add .gitattributes
-```
-
-完整上传命令已放在：
-
-```text
-GITHUB_UPLOAD_COMMANDS.md
-```
+| 平台 | 当前状态 | 说明 |
+| --- | --- | --- |
+| Windows x64 | 已作为主要路径验证 | 当前主要开发、调试和打包目标，默认使用 NSIS 安装包。 |
+| Windows ARM64 | 未测试 | 已预留目录，需要对应 FFmpeg 文件和真机/虚拟环境验证。 |
+| macOS ARM64 | 未测试 | 需要 macOS 环境、FFmpeg 执行权限、签名/公证方案和平台验证。 |
+| macOS x64 | 未测试 | 需要对应构建环境和平台验证。 |
+| Linux x64 | 未测试 | 需要 Linux Tauri 系统依赖、对应 FFmpeg 文件和平台验证。 |
+| Linux ARM64 | 未测试 | 需要对应构建环境、对应 FFmpeg 文件和平台验证。 |
 
 ## 运行数据存储策略
 
@@ -186,7 +207,7 @@ PrivacyWatermarkCodecData/
 └─ work/
 ```
 
-NSIS 安装器会尽量选择非系统盘。卸载时会删除安装目录下的 `PrivacyWatermarkCodecData`。
+Windows 安装器会尽量选择非系统盘。卸载时会删除安装目录下的 `PrivacyWatermarkCodecData`。
 
 ## Windows 右键菜单
 
@@ -200,30 +221,6 @@ Privacy Watermark Codec
 ```
 
 菜单带软件图标，支持多选图片。多选文件会由单实例机制合并导入。
-
-## 使用说明
-
-### 编码
-
-1. 选择图片或视频。
-2. 选择输出目录。
-3. 输入水印文本。
-4. 选择密钥模式。
-5. 开始编码。
-
-### 解码
-
-1. 选择已编码媒体。
-2. 选择 `.key` 文件，或输入原始自定义密码。
-3. 开始解码与检测。
-
-### 扫描未知图片
-
-1. 选择一个或多个未知图片，或通过右键菜单导入。
-2. 开始扫描。右键菜单选择“无密钥扫描”后会在导入完成后自动扫描。
-3. 查看痕迹摘要。
-
-检测到项目水印头，只能说明图片可能含有本项目加密水印；没有密钥或密码时不会显示水印正文。未检出水印也不等于图片一定没有水印。
 
 ## 密钥文件提醒
 
@@ -244,12 +241,6 @@ privacy-watermark-codec/
 └─ .github/workflows/           Windows 发布工作流
 ```
 
-## 审阅说明
+## AI 编程提示
 
-当前包已静态检查明显错误路径、过期 README 引用、右键菜单 `%*` 传参、启动阶段 FFmpeg 自动探测，以及 FFmpeg 命令行窗口闪现相关代码。前端类型检查和生产构建已通过：
-
-```bash
-npm run build
-```
-
-Rust 编译和 Windows 安装包生成仍需在复制 FFmpeg 二进制后的目标 Windows 机器上再次验证。
+本项目由 AI 辅助编程完成。正式发布或生产使用前，应由开发者复核代码、使用自有样本验证水印效果，并确认所有第三方二进制文件的许可证合规性。

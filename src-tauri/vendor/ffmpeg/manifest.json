@@ -1,3 +1,108 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:1002512694be9402df1c0b55e16f56ae0566b9c380f1fbefcedf24f25953a05e
-size 5030
+{
+  "version": "8.1.2",
+  "source": "Bundled FFmpeg binaries stored under src-tauri/vendor/ffmpeg. Keep upstream download URL, source URL, license files, and build notes together with this project.",
+  "buildLicense": "GPL-2.0-or-later-build-check-required",
+  "buildConfigure": "--prefix=/ffbuild/prefix --pkg-config-flags=--static --pkg-config=pkg-config --cross-prefix=x86_64-w64-mingw32- --arch=x86_64 --target-os=mingw32 --enable-gpl --enable-version3 --disable-debug --disable-w32threads --enable-pthreads --enable-iconv --enable-zlib --enable-libxml2 --enable-libvmaf --enable-fontconfig --enable-libharfbuzz --enable-libfreetype --enable-libfribidi --enable-vulkan --enable-libshaderc --enable-libvorbis --disable-libxcb --disable-xlib --disable-libpulse --enable-gmp --enable-lzma --enable-liblcevc-dec --enable-opencl --enable-amf --enable-libaom --enable-libaribb24 --enable-avisynth --enable-chromaprint --enable-libdav1d --enable-libdavs2 --enable-libdvdread --enable-libdvdnav --disable-libfdk-aac --enable-ffnvcodec --enable-cuda-llvm --enable-frei0r --enable-libgme --enable-libkvazaar --enable-libaribcaption --enable-libass --enable-libbluray --enable-libjxl --enable-libmp3lame --enable-libopus --enable-libplacebo --enable-librist --enable-libssh --enable-libtheora --enable-libvpx --enable-libwebp --enable-libzmq --enable-lv2 --enable-libvpl --enable-openal --enable-liboapv --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libopenh264 --enable-libopenjpeg --enable-libopenmpt --enable-librav1e --enable-librubberband --enable-schannel --enable-sdl2 --enable-libsnappy --enable-libsoxr --enable-libsrt --enable-libsvtav1 --enable-libtwolame --enable-libuavs3d --disable-libdrm --enable-vaapi --enable-libvidstab --enable-libvvenc --disable-whisper --enable-libx264 --enable-libx265 --enable-libxavs2 --enable-libxvid --enable-libzimg --enable-libzvbi --extra-cflags=-DLIBTWOLAME_STATIC --extra-cxxflags= --extra-libs=-lgomp --extra-ldflags=-pthread --extra-ldexeflags= --cc=x86_64-w64-mingw32-gcc --cxx=x86_64-w64-mingw32-g++ --ar=x86_64-w64-mingw32-gcc-ar --ranlib=x86_64-w64-mingw32-gcc-ranlib --nm=x86_64-w64-mingw32-gcc-nm --extra-version=20260629",
+  "generatedAt": "2026-07-01T15:15:41.405Z",
+  "platforms": {
+    "windows_x64": {
+      "ffmpeg": {
+        "file": "ffmpeg.exe",
+        "sha256": "53edd89ba544649b13108c9a031db5b298497915f5807bd825555bd57973225d"
+      },
+      "ffprobe": {
+        "file": "ffprobe.exe",
+        "sha256": "dbadfdd6dd80ba88f8f256d457f4074e963e174f0d86a2726089b393e7c3f508"
+      },
+      "ffplay": {
+        "file": "ffplay.exe",
+        "sha256": "d530d3c24428081763d980a357a5db30852e0ff32f2fe487c2d8819d61e78f9c"
+      }
+    },
+    "windows_arm64": {
+      "ffmpeg": {
+        "file": "ffmpeg.exe",
+        "sha256": "230e4782a4f85ac756cc259c357fb5c3057e08522e8708d32316745fad60e685"
+      },
+      "ffprobe": {
+        "file": "ffprobe.exe",
+        "sha256": "add92fb52a9cf0c44ab494699ede87a15dfe47d7883511a9eb7560afd0cdd249"
+      },
+      "ffplay": {
+        "file": "ffplay.exe",
+        "sha256": "e1f4b34041f3111a2feee43064ad233e855de5c28d36f746ef94a2404e319c03"
+      }
+    },
+    "macos_x64": {
+      "ffmpeg": {
+        "file": "ffmpeg",
+        "sha256": ""
+      },
+      "ffprobe": {
+        "file": "ffprobe",
+        "sha256": ""
+      },
+      "ffplay": {
+        "file": "ffplay",
+        "sha256": ""
+      }
+    },
+    "macos_arm64": {
+      "ffmpeg": {
+        "file": "ffmpeg",
+        "sha256": "60725ea0467ccaf900bf294d3567c302a802dc661f03bdde6aa7ecc9ccf05c4f"
+      },
+      "ffprobe": {
+        "file": "ffprobe",
+        "sha256": "a45033d0e45ede2683cee401545becd7ef1a9873ea6f640c0acf0b90f7730b67"
+      },
+      "ffplay": {
+        "file": "ffplay",
+        "sha256": "70fb98d096e4bf7ad7359f1f335b2f711b8ecb67f71402421ab9573535c6b4d3"
+      }
+    },
+    "linux_x64": {
+      "ffmpeg": {
+        "file": "ffmpeg",
+        "sha256": "ebec41de068a0af37ec5ce5537a4948e2aec4d344388b342a1a01abcea8d82c6"
+      },
+      "ffprobe": {
+        "file": "ffprobe",
+        "sha256": "1482ecc11ac3cfff28f8ddc6d7ce3384693678f251b1a261979382d87abf39c2"
+      },
+      "ffplay": {
+        "file": "ffplay",
+        "sha256": "3e3bbfb590514302dedc64ebe8cbb887710345f71b80cca7cb6827c0e418c06d"
+      }
+    },
+    "linux_amd64": {
+      "ffmpeg": {
+        "file": "ffmpeg",
+        "sha256": "66599457fc7cc9661ee8e12da4552c794153798e845b68f336c4c1786d6a6f80"
+      },
+      "ffprobe": {
+        "file": "ffprobe",
+        "sha256": "66047abbd24b7c952ef5fabe0425abbfd378af1e714e3469616b59bec2329509"
+      },
+      "ffplay": {
+        "file": "ffplay",
+        "sha256": "d117a17116c83cf6d5287a63a5f5cb2182254cedba50e93b2bf57d301c500b60"
+      }
+    },
+    "linux_arm64": {
+      "ffmpeg": {
+        "file": "ffmpeg",
+        "sha256": ""
+      },
+      "ffprobe": {
+        "file": "ffprobe",
+        "sha256": ""
+      },
+      "ffplay": {
+        "file": "ffplay",
+        "sha256": ""
+      }
+    }
+  },
+  "utcCompileDate": "2026-06-17"
+}

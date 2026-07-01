@@ -8,12 +8,15 @@ export interface EncodeRequest {
   customPassword?: string;
   writeKeyFile: boolean;
   strength: number;
+  frameParallelism?: number;
+  taskId?: string;
 }
 
 export interface EncodeItemResult {
   inputPath: string;
   outputPath: string;
   keyPath?: string;
+  manifestPath?: string;
   mediaType: "image" | "video";
   psnr?: number;
   frameCount?: number;
@@ -23,12 +26,31 @@ export interface EncodeResponse {
   outputRoot: string;
   items: EncodeItemResult[];
   sharedKeyPath?: string;
+  manifestPath?: string;
 }
 
 export interface DecodeRequest {
   inputPaths: string[];
   keyFile?: string;
   customPassword?: string;
+  frameParallelism?: number;
+  taskId?: string;
+}
+
+export interface TamperRegion {
+  index: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  distance: number;
+  status: "intact" | "uncertain" | "modified" | string;
+}
+
+export interface SyncRegistration {
+  rotationDegrees: number;
+  scale: number;
+  score: number;
 }
 
 export interface DecodeItemResult {
@@ -41,6 +63,8 @@ export interface DecodeItemResult {
   frameCount?: number;
   validFrames?: number;
   modifiedFrames?: number;
+  tamperRegions: TamperRegion[];
+  syncRegistration?: SyncRegistration;
 }
 
 export interface DecodeResponse {
@@ -49,6 +73,7 @@ export interface DecodeResponse {
 
 export interface ScanRequest {
   inputPaths: string[];
+  taskId?: string;
 }
 
 export interface ScanDetection {
@@ -70,6 +95,23 @@ export interface ScanItemResult {
 
 export interface ScanResponse {
   items: ScanItemResult[];
+}
+
+export interface CancelTaskRequest {
+  taskId: string;
+}
+
+export type TaskProgressKind = "encode" | "decode" | "scan";
+
+export interface TaskProgressEvent {
+  taskId?: string;
+  task: TaskProgressKind;
+  phase: string;
+  message: string;
+  current: number;
+  total: number;
+  percent: number;
+  currentPath?: string;
 }
 
 export interface FfmpegBinaryInfo {
@@ -94,6 +136,20 @@ export interface FfmpegRuntimeInfo {
   ffprobe?: FfmpegBinaryInfo;
   extraBinaries: FfmpegBinaryInfo[];
   licenseText: string;
+}
+
+export interface ReleasePackageSigningMetadata {
+  signatureAlgorithm: string;
+  signer: string;
+  signature: string;
+  artifactSha256: string;
+  manifestSha256: string;
+}
+
+export interface ReleaseMetadata {
+  automaticUpdate: boolean;
+  manifestUrl: string;
+  packageSigning: ReleasePackageSigningMetadata;
 }
 
 export interface LaunchContext {

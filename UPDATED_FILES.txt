@@ -1,0 +1,1 @@
+Overwrite these paths in the original project. Remove crates/watermark-core/src/hamming.rs after copying, because the ECC implementation has been upgraded to crates/watermark-core/src/bch.rs.
