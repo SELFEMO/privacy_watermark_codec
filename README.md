@@ -61,6 +61,10 @@ src-tauri/vendor/ffmpeg/windows_arm64/ffprobe.exe
 src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg
 src-tauri/vendor/ffmpeg/macos_arm64/ffprobe
 
+src-tauri/vendor/ffmpeg/macos_amd64/ffmpeg
+src-tauri/vendor/ffmpeg/macos_amd64/ffprobe
+
+# macos_x64 is a compatibility alias for macos_amd64 and can still be used when already present.
 src-tauri/vendor/ffmpeg/macos_x64/ffmpeg
 src-tauri/vendor/ffmpeg/macos_x64/ffprobe
 
@@ -83,6 +87,7 @@ On macOS and Linux, make runtime files executable before packaging. Replace the 
 
 ```text
 chmod +x src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg src-tauri/vendor/ffmpeg/macos_arm64/ffprobe
+chmod +x src-tauri/vendor/ffmpeg/macos_amd64/ffmpeg src-tauri/vendor/ffmpeg/macos_amd64/ffprobe
 chmod +x src-tauri/vendor/ffmpeg/linux_x64/ffmpeg src-tauri/vendor/ffmpeg/linux_x64/ffprobe
 ```
 
@@ -146,16 +151,91 @@ Start development mode:
 npm run tauri:dev
 ```
 
-Build installer/package:
+Build the package for the current platform:
 
 ```text
 npm run tauri:build
 ```
 
-The Windows NSIS installer is generated under:
+Build a specific platform target:
+
+```text
+npm run tauri:build:windows:nsis
+npm run tauri:build:macos
+npm run tauri:build:macos:amd64
+npm run tauri:build:macos:arm64
+npm run tauri:build:linux
+```
+
+
+### Build an Intel Mac package on an Apple Silicon Mac
+
+If the current machine is an M-series Mac but you need a package for Intel Mac users, you must prepare both the Rust Intel target and Intel-architecture FFmpeg files. `aarch64` / `arm64` means Apple Silicon, while `x86_64` / `amd64` means Intel Mac. Do not copy FFmpeg from `macos_arm64` into `macos_amd64`; otherwise the package target may look like Intel, but the bundled runtime architecture will be wrong.
+
+First, install the Rust Intel Mac target:
+
+```text
+rustup target add x86_64-apple-darwin
+```
+
+Second, prepare Intel FFmpeg and place it in the `macos_amd64` directory:
+
+```text
+mkdir -p src-tauri/vendor/ffmpeg/macos_amd64
+# Copy x86_64 ffmpeg, ffprobe, and ffplay into this directory.
+```
+
+After copying, verify that the binaries are really `x86_64`:
+
+```text
+file src-tauri/vendor/ffmpeg/macos_amd64/ffmpeg
+file src-tauri/vendor/ffmpeg/macos_amd64/ffprobe
+file src-tauri/vendor/ffmpeg/macos_amd64/ffplay
+```
+
+The expected output should contain:
+
+```text
+Mach-O 64-bit executable x86_64
+```
+
+If the output says `arm64`, or if it is a universal binary that does not include `x86_64`, it is not suitable for the Intel Mac target package.
+
+Third, set executable permissions and refresh the FFmpeg manifest:
+
+```text
+chmod 755 src-tauri/vendor/ffmpeg/macos_amd64/ffmpeg
+chmod 755 src-tauri/vendor/ffmpeg/macos_amd64/ffprobe
+chmod 755 src-tauri/vendor/ffmpeg/macos_amd64/ffplay
+npm run ffmpeg:manifest
+```
+
+Fourth, build the Intel Mac package from the Apple Silicon Mac:
+
+```text
+npm run tauri:build:macos:amd64
+```
+
+If a DMG is also required, run:
+
+```text
+npm run tauri:build:macos:amd64:dmg
+```
+
+Common output directories:
+
+```text
+target/x86_64-apple-darwin/release/bundle/macos/
+target/x86_64-apple-darwin/release/bundle/dmg/
+```
+
+Common output directories:
 
 ```text
 target/release/bundle/nsis/
+target/release/bundle/dmg/
+target/release/bundle/macos/
+target/x86_64-apple-darwin/release/bundle/dmg/
 ```
 
 ## Usage
@@ -190,12 +270,12 @@ A positive project-header scan means an encrypted project watermark may be prese
 
 | Platform | Current status | Notes |
 | --- | --- | --- |
-| Windows x64 | Main verified path | Main development, debugging, and packaging target. NSIS is the default installer format. |
-| Windows ARM64 | Not tested | Directory placeholder exists. Requires matching FFmpeg files and platform validation. |
-| macOS ARM64 | Not tested | Requires macOS environment, FFmpeg executable permissions, signing/notarization decisions, and validation. |
-| macOS x64 | Not tested | Requires matching build environment and platform validation. |
-| Linux x64 | Not tested | Requires Linux Tauri system dependencies, matching FFmpeg files, and platform validation. |
-| Linux ARM64 | Not tested | Requires matching build environment, matching FFmpeg files, and platform validation. |
+| Windows x64 | Verified | Encoding, decoding, packaging, and NSIS installer flow have passed. |
+| Windows ARM64 | Supported, pending device review | Directory and build-script support are present. Review with matching FFmpeg files on a target device. |
+| macOS ARM64 | Verified | Apple Silicon build flow, FFmpeg manifest generation, and local runtime flow have passed. |
+| macOS AMD64 / x64 | Verified | Both `macos_amd64` and `macos_x64` directory names are supported for Intel Mac target packages. |
+| Linux x64 | Supported, pending release-environment review | Directory and build-script support are present. Review system dependencies and packaging on a Linux release environment. |
+| Linux ARM64 | Supported, pending device review | Directory and build-script support are present. Review with matching FFmpeg files on a target device. |
 
 ## Runtime storage policy
 
@@ -244,3 +324,14 @@ privacy-watermark-codec/
 ## AI development notice
 
 This project was implemented with AI-assisted programming. Before public release or production use, review the code, verify watermark behavior with your own sample set, and confirm all third-party binary licenses.
+
+
+### FFmpeg automatic preparation
+
+When `npm run ffmpeg:manifest` or `npm run tauri:build` runs, the script first checks `src-tauri/vendor/ffmpeg/<current-platform>/`. If the current platform is missing `ffmpeg` and `ffprobe` but FFmpeg is already available in `PATH`, the script copies the current-platform `ffmpeg`, `ffprobe`, and optional `ffplay` into the matching vendor directory and regenerates the manifest. Cross-building for another architecture still requires FFmpeg binaries for that target architecture.
+
+### macOS build notes
+
+On macOS, `npm run tauri:build` now builds the current-architecture `.app` first, because `.app` is the runnable artifact and DMG creation can fail due to local `hdiutil`, mount, or permission state. Use `npm run tauri:build:macos:dmg` only when you specifically need a `.dmg`.
+
+Apple Silicon builds require `src-tauri/vendor/ffmpeg/macos_arm64`. Intel Mac builds require `src-tauri/vendor/ffmpeg/macos_amd64` or `src-tauri/vendor/ffmpeg/macos_x64`; ARM64 FFmpeg cannot be reused for the Intel package.

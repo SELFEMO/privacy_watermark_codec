@@ -188,6 +188,36 @@ pub fn embed_image_file(
     })
 }
 
+
+pub fn embed_image_file_with_auto_strength(
+    input_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    options: &EmbedOptions,
+) -> Result<EmbedReport> {
+    let input_path = input_path.as_ref();
+    let output_path = output_path.as_ref();
+    let mut strength = options.strength;
+    let minimum_strength = if options.media_kind == "video_frame" { 7.0 } else { 3.0 };
+
+    loop {
+        let mut attempt = options.clone();
+        attempt.strength = strength;
+        match embed_image_file(input_path, output_path, &attempt) {
+            Ok(report) => return Ok(report),
+            Err(error) if is_psnr_retryable(&error) && strength > minimum_strength => {
+                // 自动降低强度只针对 PSNR 不达标场景，是为了让普通照片和视频帧优先完成处理，同时仍保留最低可用水印强度。
+                // Strength is reduced only when PSNR fails so ordinary photos and video frames can complete while keeping a usable minimum watermark strength.
+                strength = (strength - 1.0).max(minimum_strength);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_psnr_retryable(error: &CoreError) -> bool {
+    matches!(error, CoreError::InvalidArgument(message) if message.contains("PSNR"))
+}
+
 pub fn probe_embedded_header_file(
     input_path: impl AsRef<Path>,
 ) -> Result<Option<PublicWatermarkHeader>> {

@@ -12,7 +12,7 @@ use std::{
 use tracing::{info, warn};
 use walkdir::WalkDir;
 use watermark_core::{
-    embed_image_file, extract_image_file_with_options, EmbedOptions, ExtractOptions, IntegrityStatus,
+    embed_image_file_with_auto_strength, extract_image_file_with_options, EmbedOptions, ExtractOptions, IntegrityStatus,
     KeySource, SyncRegistration, TamperRegion, WatermarkKey,
 };
 
@@ -115,6 +115,7 @@ pub fn encode_video(
         0.28,
         0,
         0,
+        Some(source_frames.clone()),
         input_duration_seconds,
         &tools.ffmpeg,
         [
@@ -166,7 +167,7 @@ pub fn encode_video(
                         strength: strength.max(16.0),
                         media_kind: "video_frame".into(),
                     };
-                    embed_image_file(&frame, &output_frame, &options).map_err(|error| error.to_string())
+                    embed_image_file_with_auto_strength(&frame, &output_frame, &options).map_err(|error| error.to_string())
                 }));
             }
 
@@ -208,6 +209,7 @@ pub fn encode_video(
         0.98,
         frames.len(),
         frames.len(),
+        None,
         input_duration_seconds,
         &tools.ffmpeg,
         [
@@ -275,6 +277,7 @@ pub fn decode_video(
         0.28,
         0,
         0,
+        Some(frames_dir.clone()),
         input_duration_seconds,
         &tools.ffmpeg,
         [
@@ -437,17 +440,46 @@ fn normalize_parallelism(requested: usize) -> usize {
     requested
 }
 
+#[cfg(unix)]
+fn ensure_program_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("无法读取 FFmpeg 文件权限 {}：{error}", path.display()))?;
+    let mode = metadata.permissions().mode();
+    if mode & 0o755 == 0o755 {
+        return Ok(());
+    }
+
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(mode | 0o755);
+    // 视频任务真正启动 FFmpeg 前再修复一次执行权限，避免 manifest 阶段与运行阶段资源目录不同导致 macOS 报 Permission denied。
+    // The executable bit is fixed right before video tasks start so macOS does not fail with Permission denied when manifest and runtime resource paths differ.
+    fs::set_permissions(path, permissions)
+        .map_err(|error| format!("无法设置 FFmpeg 可执行权限 {}：{error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn ensure_program_executable(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn hidden_command(program: &Path) -> Command {
     let mut command = Command::new(program);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        // FFmpeg/FFprobe 是内部后台工具，隐藏控制台窗口可避免桌面端用户看到闪现的命令行。
-        // FFmpeg/FFprobe are internal background tools, so hiding the console prevents command windows from flashing in the desktop app.
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    // FFmpeg/FFprobe 是内部后台工具，隐藏控制台窗口可避免桌面端用户看到闪现的命令行。
+    // FFmpeg/FFprobe are internal background tools, so hiding the console prevents command windows from flashing in the desktop app.
+    command.creation_flags(CREATE_NO_WINDOW);
     command
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hidden_command(program: &Path) -> Command {
+    // 非 Windows 平台没有 creation_flags，直接返回 Command 可以避免 macOS/Linux 构建产生无意义的 mut warning。
+    // Non-Windows platforms do not use creation_flags, so returning Command directly avoids a meaningless mut warning on macOS/Linux builds.
+    Command::new(program)
 }
 
 fn run_ffmpeg_with_progress<I>(
@@ -460,6 +492,7 @@ fn run_ffmpeg_with_progress<I>(
     end_fraction: f64,
     current: usize,
     total: usize,
+    observed_output_dir: Option<PathBuf>,
     media_duration_seconds: Option<f64>,
     program: &Path,
     args: I,
@@ -469,6 +502,7 @@ where
 {
     cancellation.check()?;
     let args: Vec<OsString> = args.into_iter().collect();
+    ensure_program_executable(program)?;
     let mut child = hidden_command(program)
         .args(&args)
         .stdout(Stdio::piped())
@@ -518,12 +552,17 @@ where
                 latest_ratio = progress_ratio;
                 let elapsed = started_at.elapsed().as_secs();
                 let file_fraction = start_fraction + (end_fraction - start_fraction) * progress_ratio;
+                let observed_count = observed_output_dir.as_deref().map(count_png_files).unwrap_or(current);
+                let generated_suffix = observed_output_dir
+                    .as_ref()
+                    .map(|_| format!("，已生成 {observed_count} 帧"))
+                    .unwrap_or_default();
                 progress.emit(
                     app,
                     phase,
-                    format!("{heartbeat_message}，阶段进度 {:.0}% ，已运行 {elapsed} 秒", progress_ratio * 100.0),
+                    format!("{heartbeat_message}，阶段进度 {:.0}% ，已运行 {elapsed} 秒{generated_suffix}", progress_ratio * 100.0),
                     file_fraction,
-                    current,
+                    observed_count,
                     total,
                 );
             }
@@ -553,12 +592,17 @@ where
             // 抽帧和封装有时不能稳定输出逐行进度，因此仍保留心跳事件，避免界面看起来像完全卡死。
             // Extraction and muxing do not always emit stable line-by-line progress, so heartbeat updates remain as a fallback to avoid a frozen-looking UI.
             let file_fraction = start_fraction + (end_fraction - start_fraction) * latest_ratio;
+            let observed_count = observed_output_dir.as_deref().map(count_png_files).unwrap_or(current);
+            let generated_suffix = observed_output_dir
+                .as_ref()
+                .map(|_| format!("，已生成 {observed_count} 帧"))
+                .unwrap_or_default();
             progress.emit(
                 app,
                 phase,
-                format!("{heartbeat_message}，已运行 {elapsed} 秒"),
+                format!("{heartbeat_message}，已运行 {elapsed} 秒{generated_suffix}"),
                 file_fraction,
-                current,
+                observed_count,
                 total,
             );
             next_heartbeat = Instant::now() + Duration::from_secs(1);
@@ -566,6 +610,24 @@ where
 
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn count_png_files(directory: &Path) -> usize {
+    fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .map(|extension| extension.eq_ignore_ascii_case("png"))
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 fn parse_ffmpeg_progress_ratio(line: &str, duration_micros: Option<f64>) -> Option<f64> {
@@ -581,6 +643,7 @@ fn parse_ffmpeg_progress_ratio(line: &str, duration_micros: Option<f64>) -> Opti
 }
 
 fn probe_media_duration_seconds(ffprobe: &Path, input: &Path) -> Result<Option<f64>, String> {
+    ensure_program_executable(ffprobe)?;
     let output = hidden_command(ffprobe)
         .args([
             "-v",
@@ -604,6 +667,7 @@ fn probe_media_duration_seconds(ffprobe: &Path, input: &Path) -> Result<Option<f
 }
 
 fn probe_frame_rate(ffprobe: &Path, input: &Path) -> Result<String, String> {
+    ensure_program_executable(ffprobe)?;
     let output = hidden_command(ffprobe)
         .args([
             "-v",

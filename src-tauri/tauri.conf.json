@@ -50,7 +50,14 @@
       "vendor/ffmpeg/LICENSE.txt",
       "vendor/ffmpeg/README.md",
       "vendor/ffmpeg/VERSION.txt",
-      "vendor/ffmpeg/windows_x64/*"
+      "vendor/ffmpeg/windows_x64/*",
+      "vendor/ffmpeg/windows_arm64/*",
+      "vendor/ffmpeg/macos_amd64/*",
+      "vendor/ffmpeg/macos_x64/*",
+      "vendor/ffmpeg/macos_arm64/*",
+      "vendor/ffmpeg/linux_x64/*",
+      "vendor/ffmpeg/linux_amd64/*",
+      "vendor/ffmpeg/linux_arm64/*"
     ]
   },
   "mainBinaryName": "privacy-watermark-codec"

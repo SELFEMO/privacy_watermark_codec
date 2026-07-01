@@ -6,7 +6,7 @@ use std::{
 use chrono::Local;
 use tracing::{error, info};
 use watermark_core::{
-    embed_image_file, extract_image_file, scan_image_file, EmbedOptions, KeyFile, KeyMode, KeySource,
+    embed_image_file_with_auto_strength, extract_image_file, scan_image_file, EmbedOptions, KeyFile, KeyMode, KeySource,
     WatermarkKey,
 };
 
@@ -219,7 +219,7 @@ fn encode_media_blocking(
                     &input,
                 );
                 cancellation.check()?;
-                let report = embed_image_file(
+                let report = embed_image_file_with_auto_strength(
                     &input,
                     &output,
                     &EmbedOptions {

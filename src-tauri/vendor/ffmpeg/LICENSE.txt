@@ -1,3 +1,1 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:01955959c5ea022e8a74d87a07884a85bb99b46653c8904abbd4b0620665b332
-size 343
+FFmpeg runtime license notice. Keep the upstream FFmpeg license text, source URL, and build notes with released packages. Run ffmpeg -L to inspect the effective license of the bundled binary.

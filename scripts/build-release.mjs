@@ -3,9 +3,34 @@ import { existsSync, readdirSync, renameSync, unlinkSync, readFileSync } from "n
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const bundle = process.argv[2] || "nsis";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const configPath = join(projectRoot, "src-tauri", "tauri.conf.json");
+const args = process.argv.slice(2);
+const targetIndex = args.indexOf("--target");
+const targetTriple = targetIndex >= 0 ? args[targetIndex + 1] : null;
+const requestedBundle = args.find((arg, index) => index !== targetIndex && index !== targetIndex + 1 && !arg.startsWith("--"));
+
+function defaultBundleForPlatform() {
+  if (process.platform === "win32") return "nsis";
+  if (process.platform === "darwin") return "app";
+  if (process.platform === "linux") return "appimage,deb";
+  return "app";
+}
+
+function targetPlatformFromTriple(targetTriple) {
+  if (!targetTriple) {
+    if (process.platform === "win32") return process.arch === "arm64" ? "windows_arm64" : "windows_x64";
+    if (process.platform === "darwin") return process.arch === "arm64" ? "macos_arm64" : "macos_amd64";
+    return process.arch === "arm64" ? "linux_arm64" : "linux_x64";
+  }
+  if (targetTriple.includes("apple-darwin")) return targetTriple.startsWith("aarch64") ? "macos_arm64" : "macos_amd64";
+  if (targetTriple.includes("windows")) return targetTriple.startsWith("aarch64") ? "windows_arm64" : "windows_x64";
+  if (targetTriple.includes("linux")) return targetTriple.startsWith("aarch64") ? "linux_arm64" : "linux_x64";
+  return null;
+}
+
+const bundle = requestedBundle || defaultBundleForPlatform();
+const targetPlatform = targetPlatformFromTriple(targetTriple);
 
 function sanitize(text) {
   return text
@@ -54,28 +79,64 @@ function escapeRegExp(value) {
 function renameBundleFiles() {
   const config = JSON.parse(readFileSync(configPath, "utf8"));
   const appVersion = config.version;
-  const bundleDir = join(projectRoot, "target", "release", "bundle", bundle);
-  if (!existsSync(bundleDir)) return;
+  const bundleNames = bundle.split(",").map((item) => item.trim()).filter(Boolean);
 
-  for (const file of readdirSync(bundleDir)) {
-    const versionPattern = new RegExp(`_${escapeRegExp(appVersion)}(?=_)`, "g");
-    const renamed = file.replace(versionPattern, "");
-    if (renamed === file) continue;
+  for (const bundleName of bundleNames) {
+    const bundleDir = join(projectRoot, "target", targetTriple || "", "release", "bundle", bundleName);
+    const fallbackBundleDir = join(projectRoot, "target", "release", "bundle", bundleName);
+    const actualBundleDir = existsSync(bundleDir) ? bundleDir : fallbackBundleDir;
+    if (!existsSync(actualBundleDir)) continue;
 
-    const source = join(bundleDir, file);
-    const target = join(bundleDir, renamed);
-    if (existsSync(target)) unlinkSync(target);
-    renameSync(source, target);
-    console.log(`Renamed bundle: ${renamed}`);
+    for (const file of readdirSync(actualBundleDir)) {
+      const versionPattern = new RegExp(`_${escapeRegExp(appVersion)}(?=_)`, "g");
+      const renamed = file.replace(versionPattern, "");
+      if (renamed === file) continue;
+
+      const source = join(actualBundleDir, file);
+      const target = join(actualBundleDir, renamed);
+      if (existsSync(target)) unlinkSync(target);
+      renameSync(source, target);
+      console.log(`Renamed bundle: ${renamed}`);
+    }
   }
 }
 
 const nodePath = process.execPath;
 const manifestScript = join(projectRoot, "scripts", "generate-ffmpeg-manifest.mjs");
+const preflightScript = join(projectRoot, "scripts", "preflight-tauri.mjs");
 const tauriBin = process.platform === "win32"
   ? join(projectRoot, "node_modules", ".bin", "tauri.cmd")
   : join(projectRoot, "node_modules", ".bin", "tauri");
 
-await run(nodePath, [manifestScript, "--strict"]);
-await run(tauriBin, ["build", "--bundles", bundle], true);
+const tauriArgs = ["build", "--bundles", bundle];
+if (targetTriple) {
+  // 目标三元组只影响当前构建任务，用于在 macOS 上分别产出 arm64 与 amd64 包，避免把平台架构写入项目配置。
+  // The target triple is kept per build so macOS arm64 and amd64 packages can be produced without hard-coding one architecture in project config.
+  tauriArgs.push("--target", targetTriple);
+}
+
+const manifestArgs = [manifestScript, "--strict"];
+if (targetPlatform) {
+  // 发布构建按目标平台校验 FFmpeg，避免交叉构建时误用当前宿主架构。
+  // Release builds validate FFmpeg for the target platform so cross-builds do not accidentally use the host architecture.
+  manifestArgs.push("--target-platform", targetPlatform);
+}
+
+await run(nodePath, [preflightScript]);
+await run(nodePath, manifestArgs);
+try {
+  await run(tauriBin, tauriArgs, true);
+} catch (error) {
+  if (process.platform === "darwin" && bundle.split(",").map((item) => item.trim()).includes("dmg")) {
+    const targetRoot = targetTriple ? join(projectRoot, "target", targetTriple, "release") : join(projectRoot, "target", "release");
+    const bundleDir = join(targetRoot, "bundle");
+    // DMG 生成依赖 macOS 的 hdiutil、挂载状态和本机权限；失败时保留 .app 构建结果，便于用户先验证程序本体。
+    // DMG creation depends on macOS hdiutil, mount state, and local permissions; when it fails, the .app output is preserved for application testing.
+    console.error("macOS DMG bundling failed after the application was compiled.");
+    console.error(`Check the generated bundle directory: ${bundleDir}`);
+    console.error("You can build a runnable .app without DMG by running npm run tauri:build:macos or npm run tauri:build:macos:arm64.");
+    console.error("To debug DMG generation, run the generated bundle_dmg.sh manually with bash -x.");
+  }
+  throw error;
+}
 renameBundleFiles();

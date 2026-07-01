@@ -15,5 +15,5 @@ pub use keyfile::{KeyFile, KeyMode, KeySource, WatermarkKey};
 pub use scan::{scan_image_file, PrivacyScanDetection, PrivacyScanReport, PrivacyScanStatus};
 pub use sync::SyncRegistration;
 pub use watermark::{
-    embed_image_file, extract_image_file, extract_image_file_with_options, EmbedOptions, EmbedReport, ExtractOptions, ExtractReport, IntegrityStatus, PublicWatermarkHeader,
+    embed_image_file, embed_image_file_with_auto_strength, extract_image_file, extract_image_file_with_options, EmbedOptions, EmbedReport, ExtractOptions, ExtractReport, IntegrityStatus, PublicWatermarkHeader,
 };

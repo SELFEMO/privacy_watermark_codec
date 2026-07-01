@@ -46,7 +46,7 @@ const messages = {
     contentKey: "内容与密钥",
     contentKeyDesc: "文本先加密，再写入图像亮度频域。",
     watermarkText: "水印文本",
-    watermarkPlaceholder: "例如：版权所有 / 项目编号 / 联系方式",
+    watermarkPlaceholder: "例如: 版权所有 / 项目编号 / 联系方式",
     modeA: "模式 A · 独立密钥",
     modeADesc: "每文件单独生成密钥，隔离性最高。",
     modeB: "模式 B · 共享密钥",
@@ -156,6 +156,7 @@ const messages = {
     licenseOutput: "许可证输出",
     waitingFfmpeg: "等待 FFmpeg 信息。",
     failure: "处理失败",
+    closeFailure: "关闭失败提醒",
     footer: "所有媒体、密码和密钥均在本机处理，不上传网络。",
     progressTitle: "处理进度",
     cancelTask: "取消任务",
@@ -316,6 +317,7 @@ const messages = {
     licenseOutput: "License output",
     waitingFfmpeg: "Waiting for FFmpeg info.",
     failure: "Failed",
+    closeFailure: "Close failure alert",
     footer: "All media, passwords, and keys are processed locally and never uploaded.",
     progressTitle: "Progress",
     cancelTask: "Cancel task",
@@ -399,6 +401,8 @@ const canDecode = computed(
 const canScan = computed(() => scanInputs.value.length > 0);
 const currentMessages = computed(() => messages[language.value]);
 const progressPercent = computed(() => Math.round(Math.max(0, Math.min(taskProgress.value?.percent ?? 0, 100))));
+const displayProgressMessage = computed(() => formatProgressMessage(taskProgress.value));
+const displayErrorMessage = computed(() => localizeRuntimeMessage(errorMessage.value));
 const ffmpegBinaries = computed<FfmpegBinaryInfo[]>(() => {
   if (!ffmpegInfo.value) return [];
   return [ffmpegInfo.value.ffmpeg, ffmpegInfo.value.ffprobe, ...ffmpegInfo.value.extraBinaries].filter(
@@ -455,6 +459,138 @@ function t(key: MessageKey, params?: Record<string, string | number>): string {
 function basename(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
+
+function containsChinese(text: string): boolean {
+  return /[\u4e00-\u9fff]/.test(text);
+}
+
+function formatProgressMessage(progress: TaskProgressEvent | null): string {
+  if (!progress?.message) return "";
+  if (language.value === "zh") return progress.message;
+
+  const englishDetail = englishProgressMessage(progress);
+  if (englishDetail) return englishDetail;
+
+  return localizeRuntimeMessage(progress.message, progress.phase);
+}
+
+function englishProgressMessage(progress: TaskProgressEvent): string {
+  const current = progress.current ?? 0;
+  const total = progress.total ?? 0;
+  const counter = total ? `${current}/${total}` : "";
+  const message = progress.message || "";
+  const elapsed = message.match(/已运行\s*(\d+)\s*秒/)?.[1];
+  const generatedFrames = message.match(/已生成\s*(\d+)\s*帧/)?.[1];
+  const stagePercent = message.match(/阶段进度\s*([0-9.]+)%/)?.[1];
+  const elapsedPart = elapsed ? `, elapsed ${elapsed}s` : "";
+  const stagePart = stagePercent ? `, stage ${stagePercent}%` : "";
+  const generatedPart = generatedFrames ? `, ${generatedFrames} frame(s) generated` : "";
+
+  switch (progress.phase) {
+    case "preparing":
+      return progress.task === "encode" ? "Preparing the encoding task" : progress.task === "decode" ? "Preparing the decode task" : "Preparing the scan task";
+    case "writing-key":
+      return "Writing the key file";
+    case "preparing-file":
+      return counter ? `Preparing file ${counter}` : "Preparing current file";
+    case "processing-image":
+      return counter ? `Embedding image watermark: ${counter}` : "Embedding image watermark";
+    case "decoding-image":
+      return counter ? `Decoding and inspecting image: ${counter}` : "Decoding and inspecting image";
+    case "scanning-image":
+      return counter ? `Scanning image: ${counter}` : "Scanning image";
+    case "extracting-video-frames":
+      return `Extracting video frames${stagePart}${generatedPart}${elapsedPart}`;
+    case "processing-video-frames":
+      return counter ? `Embedding video-frame watermark: ${counter}` : "Embedding video-frame watermark";
+    case "checking-video-frames":
+      return counter ? `Decoding and inspecting video frames: ${counter}` : "Decoding and inspecting video frames";
+    case "muxing-video":
+      return `Muxing output video${stagePart}${elapsedPart}`;
+    case "summarizing-video":
+      return "Summarizing video inspection results";
+    case "writing-evidence":
+      return "Writing the evidence manifest";
+    case "completed-file":
+      return "Current file completed";
+    case "completed":
+      return "Task completed";
+    case "failed":
+      return "Task finished with errors";
+    case "cancelled":
+      return "Task cancelled";
+    default:
+      return containsChinese(message) ? progressPhaseLabel(progress.phase) : message;
+  }
+}
+
+function localizeRuntimeMessage(message: string, phase?: string): string {
+  if (!message || language.value === "zh" || !containsChinese(message)) return message;
+
+  const replacements: Array<[RegExp, string]> = [
+    [/正在准备批量编码任务/g, "Preparing batch encoding task"],
+    [/正在写入批次密钥文件/g, "Writing batch key file"],
+    [/正在准备编码第\s*(\d+)\/(\d+)\s*个文件/g, "Preparing file $1/$2 for encoding"],
+    [/正在嵌入图片水印[:：]\s*/g, "Embedding image watermark: "],
+    [/第\s*(\d+)\/(\d+)\s*个文件编码完成/g, "File $1/$2 encoded"],
+    [/正在写入证据清单[:：]\s*/g, "Writing evidence manifest: "],
+    [/批量编码任务完成/g, "Batch encoding completed"],
+    [/正在准备批量解码检测任务/g, "Preparing batch decode task"],
+    [/正在准备检测第\s*(\d+)\/(\d+)\s*个文件/g, "Preparing file $1/$2 for inspection"],
+    [/正在解码并检测图片[:：]\s*/g, "Decoding and inspecting image: "],
+    [/批量解码检测任务完成/g, "Batch decode task completed"],
+    [/正在准备未知来源图片扫描/g, "Preparing unknown-image scan"],
+    [/正在扫描第\s*(\d+)\/(\d+)\s*张图片/g, "Scanning image $1/$2"],
+    [/未知来源图片扫描完成/g, "Unknown-image scan completed"],
+    [/正在使用 FFmpeg 抽取待检测视频帧/g, "Extracting frames from the video to inspect"],
+    [/正在使用 FFmpeg 抽取视频帧/g, "Extracting video frames"],
+    [/FFmpeg 正在抽取待检测视频帧，输出会先写入临时工作区/g, "FFmpeg is extracting frames to a temporary workspace"],
+    [/FFmpeg 正在抽取视频帧，输出会先写入临时工作区/g, "FFmpeg is extracting frames to a temporary workspace"],
+    [/视频帧已抽取，开始逐帧嵌入水印/g, "Frames extracted; embedding the watermark frame by frame"],
+    [/视频帧已抽取，开始逐帧解码检测/g, "Frames extracted; decoding and inspecting frame by frame"],
+    [/正在嵌入视频帧水印[:：]\s*/g, "Embedding video-frame watermark: "],
+    [/正在逐帧解码检测[:：]\s*/g, "Decoding frames: "],
+    [/正在重新封装视频并复制音轨/g, "Muxing the output video and copying audio"],
+    [/FFmpeg 正在重新封装输出视频/g, "FFmpeg is muxing the output video"],
+    [/正在汇总视频逐帧检测结果/g, "Summarizing per-frame video results"],
+    [/当前视频编码完成/g, "Current video encoded"],
+    [/当前视频解码检测完成/g, "Current video inspected"],
+    [/阶段进度\s*(\d+)%/g, "stage progress $1%"],
+    [/已运行\s*(\d+)\s*秒/g, "elapsed $1s"],
+    [/已生成\s*(\d+)\s*帧/g, "$1 frame(s) generated"],
+    [/任务已取消/g, "Task cancelled"],
+    [/后台任务异常终止[:：]\s*/g, "Background task terminated unexpectedly: "],
+    [/请至少选择一个待解码媒体文件/g, "Select at least one media file to decode"],
+    [/请至少选择一个待编码媒体文件/g, "Select at least one media file to encode"],
+    [/请至少选择一张待检测图片/g, "Select at least one image to scan"],
+    [/输入文件不存在[:：]\s*/g, "Input file does not exist: "],
+    [/不支持的文件类型[:：]\s*/g, "Unsupported file type: "],
+    [/未知来源隐私水印扫描当前仅支持图片[:：]\s*/g, "Unknown-source watermark scanning currently supports images only: "],
+    [/水印文本不能为空/g, "Watermark text cannot be empty"],
+    [/嵌入强度必须位于\s*3\s*到\s*20\s*之间/g, "Embedding strength must be between 3 and 20"],
+    [/当前参数得到的 PSNR 为\s*([0-9.]+)\s*dB，低于\s*([0-9.]+)\s*dB。请降低嵌入强度或缩短文本/g, "The current settings produced PSNR $1 dB, below $2 dB. Lower the embedding strength or shorten the text."],
+    [/FFmpeg 命令执行失败（退出码\s*([^）]+)）[:：]\s*/g, "FFmpeg command failed (exit code $1): "],
+    [/无法启动\s*([\s\S]*?)[:：]\s*Permission denied \(os error 13\)/g, "Unable to start $1: permission denied. Run npm run ffmpeg:manifest or chmod +x the bundled FFmpeg files."],
+    [/无法执行\s*([\s\S]*?)[:：]\s*Permission denied \(os error 13\)/g, "Unable to execute $1: permission denied. Run npm run ffmpeg:manifest or chmod +x the bundled FFmpeg files."],
+    [/无法启动\s*([\s\S]*?)[:：]/g, "Unable to start $1: "],
+    [/无法执行\s*([\s\S]*?)[:：]/g, "Unable to execute $1: "],
+    [/无法设置 FFmpeg 可执行权限\s*([^：:]+)[:：]\s*/g, "Unable to set executable permission on FFmpeg $1: "],
+    [/无法读取 FFmpeg 文件权限\s*([^：:]+)[:：]\s*/g, "Unable to read FFmpeg file permissions $1: "],
+    [/无法启动/g, "Unable to start"],
+    [/无法执行/g, "Unable to execute"],
+    [/等待/g, "Waiting for"],
+    [/执行结果失败[:：]\s*/g, "result failed: "],
+  ];
+
+  let localized = message;
+  for (const [pattern, replacement] of replacements) {
+    localized = localized.replace(pattern, replacement);
+  }
+  // 如果仍含有中文，说明后端返回了未覆盖的新诊断。英文界面下保留原文会再次出现中英混排，因此用阶段标签兜底。
+  // If Chinese remains, the backend returned a new diagnostic. In English mode we fall back to the phase label to avoid mixed-language UI.
+  return containsChinese(localized) ? progressPhaseLabel(phase || taskProgress.value?.phase) : localized;
+}
+
 
 function previewNames(paths: string[], limit = 4): string[] {
   return paths.slice(0, limit).map(basename);
@@ -911,41 +1047,41 @@ onBeforeUnmount(() => {
       <article class="card action-card">
         <div class="section-heading"><span>03</span><div><h2>{{ t("paramsRun") }}</h2><p>{{ t("paramsRunDesc") }}</p></div></div>
         <label v-if="keyMode === 'custom'" class="field"><span>{{ t("customPassword") }}</span><input v-model="customPassword" type="password" autocomplete="new-password" :placeholder="t('customPasswordHint')" /></label>
-        <label class="field range-field"><span>{{ t("embedStrength") }}：{{ strength }}</span><input v-model.number="strength" type="range" min="5" max="14" step="1" /><small>{{ t("strengthHint") }}</small></label>
-        <label class="field range-field"><span>{{ t("frameParallelism") }}：{{ frameParallelism }}</span><input v-model.number="frameParallelism" type="range" min="1" max="8" step="1" /><small>{{ t("frameParallelismHint") }}</small></label>
+        <label class="field range-field"><span>{{ t("embedStrength") }}: {{ strength }}</span><input v-model.number="strength" type="range" min="5" max="14" step="1" /><small>{{ t("strengthHint") }}</small></label>
+        <label class="field range-field"><span>{{ t("frameParallelism") }}: {{ frameParallelism }}</span><input v-model.number="frameParallelism" type="range" min="1" max="8" step="1" /><small>{{ t("frameParallelismHint") }}</small></label>
         <label class="toggle-row"><input v-model="writeKeyFile" type="checkbox" :disabled="keyMode !== 'custom'" /><span><strong>{{ t("writeKey") }}</strong><small>{{ keyMode === "custom" ? t("writeKeyCustom") : t("writeKeyRandom") }}</small></span></label>
         <div class="task-actions">
           <button class="primary" :disabled="!canEncode || busy" @click="runEncode">{{ busy ? t("encoding") : t("startEncode") }}</button>
           <button v-if="showProgress('encode') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button>
         </div>
-        <div v-if="showProgress('encode')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ progressPhaseLabel(taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}：{{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressCounter") }}：{{ taskProgress.current }}/{{ taskProgress.total }}</small><small v-if="taskProgress?.message">{{ taskProgress.message }}</small></div>
-        <div v-if="encodeResult" class="result-card success"><h3>{{ t("encodeDone") }}</h3><p>{{ t("output") }}：{{ encodeResult.outputRoot }}</p><p v-if="encodeResult.manifestPath">{{ t("evidenceManifest") }}：{{ encodeResult.manifestPath }}</p><div class="result-items"><article v-for="item in encodeResult.items.slice(0, 3)" :key="item.outputPath"><strong>{{ basename(item.outputPath) }}</strong><span>{{ item.mediaType === "image" ? `PSNR ${item.psnr?.toFixed(2) ?? "-"} dB` : `${item.frameCount ?? 0}` }}</span></article><article v-if="encodeResult.items.length > 3"><strong>{{ t("otherFiles") }}</strong><span>+{{ encodeResult.items.length - 3 }}</span></article></div></div>
+        <div v-if="showProgress('encode')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ progressPhaseLabel(taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}: {{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressCounter") }}: {{ taskProgress.current }}/{{ taskProgress.total }}</small><small v-if="displayProgressMessage">{{ displayProgressMessage }}</small></div>
+        <div v-if="encodeResult" class="result-card success"><h3>{{ t("encodeDone") }}</h3><p>{{ t("output") }}: {{ encodeResult.outputRoot }}</p><p v-if="encodeResult.manifestPath">{{ t("evidenceManifest") }}: {{ encodeResult.manifestPath }}</p><div class="result-items"><article v-for="item in encodeResult.items.slice(0, 3)" :key="item.outputPath"><strong>{{ basename(item.outputPath) }}</strong><span>{{ item.mediaType === "image" ? `PSNR ${item.psnr?.toFixed(2) ?? "-"} dB` : `${item.frameCount ?? 0}` }}</span></article><article v-if="encodeResult.items.length > 3"><strong>{{ t("otherFiles") }}</strong><span>+{{ encodeResult.items.length - 3 }}</span></article></div></div>
       </article>
     </section>
 
     <section v-else-if="activeTab === 'decode'" class="panel panel-grid decode-grid">
       <article class="card"><div class="section-heading"><span>01</span><div><h2>{{ t("selectDecodeMedia") }}</h2><p>{{ t("selectDecodeMediaDesc") }}</p></div></div><button class="file-picker tall" @click="chooseDecodeInputs"><strong>{{ t("chooseWatermarked") }}</strong><span>{{ decodeInputs.length ? t("selectedFiles", { count: decodeInputs.length }) : t("chooseMediaClick") }}</span></button><div v-if="decodeInputs.length" class="import-summary"><div class="import-summary-head"><small>{{ t("currentImport") }}</small><button type="button" :disabled="busy" @click="clearDecodeInputs">{{ t("clearImportedFiles") }}</button></div><div class="file-list inline-list"><span v-for="name in previewNames(decodeInputs)" :key="name">{{ name }}</span><span v-if="restCount(decodeInputs)">+{{ restCount(decodeInputs) }}</span></div></div></article>
-      <article class="card action-card"><div class="section-heading"><span>02</span><div><h2>{{ t("credentials") }}</h2><p>{{ t("credentialsDesc") }}</p></div></div><div class="credential-picker"><button class="file-picker" @click="chooseKeyFile"><strong>{{ t("chooseKeyFile") }}</strong><span>{{ decodeKeyFile ? basename(decodeKeyFile) : t("chooseKeyFileHint") }}</span></button><button v-if="decodeKeyFile" class="secondary-button clear-key-button" type="button" @click="clearDecodeKeyFile">{{ t("clearKeyFile") }}</button></div><label class="field"><span>{{ t("orPassword") }}</span><input v-model="decodePassword" type="password" autocomplete="current-password" :placeholder="t('passwordModeC')" /></label><label class="field range-field"><span>{{ t("decodeFrameParallelism") }}：{{ decodeFrameParallelism }}</span><input v-model.number="decodeFrameParallelism" type="range" min="1" max="8" step="1" /><small>{{ t("decodeFrameParallelismHint") }}</small></label><div class="task-actions"><button class="primary" :disabled="!canDecode || busy" @click="runDecode">{{ busy ? t("decoding") : t("startDecode") }}</button><button v-if="showProgress('decode') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div><div v-if="showProgress('decode')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ progressPhaseLabel(taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}：{{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressCounter") }}：{{ taskProgress.current }}/{{ taskProgress.total }}</small><small v-if="taskProgress?.message">{{ taskProgress.message }}</small></div></article>
+      <article class="card action-card"><div class="section-heading"><span>02</span><div><h2>{{ t("credentials") }}</h2><p>{{ t("credentialsDesc") }}</p></div></div><div class="credential-picker"><button class="file-picker" @click="chooseKeyFile"><strong>{{ t("chooseKeyFile") }}</strong><span>{{ decodeKeyFile ? basename(decodeKeyFile) : t("chooseKeyFileHint") }}</span></button><button v-if="decodeKeyFile" class="secondary-button clear-key-button" type="button" @click="clearDecodeKeyFile">{{ t("clearKeyFile") }}</button></div><label class="field"><span>{{ t("orPassword") }}</span><input v-model="decodePassword" type="password" autocomplete="current-password" :placeholder="t('passwordModeC')" /></label><label class="field range-field"><span>{{ t("decodeFrameParallelism") }}: {{ decodeFrameParallelism }}</span><input v-model.number="decodeFrameParallelism" type="range" min="1" max="8" step="1" /><small>{{ t("decodeFrameParallelismHint") }}</small></label><div class="task-actions"><button class="primary" :disabled="!canDecode || busy" @click="runDecode">{{ busy ? t("decoding") : t("startDecode") }}</button><button v-if="showProgress('decode') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div><div v-if="showProgress('decode')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ progressPhaseLabel(taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}: {{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressCounter") }}: {{ taskProgress.current }}/{{ taskProgress.total }}</small><small v-if="displayProgressMessage">{{ displayProgressMessage }}</small></div></article>
       <article class="card result-panel"><div class="section-heading"><span>03</span><div><h2>{{ t("detectResult") }}</h2><p>{{ t("detectResultDesc") }}</p></div></div><div v-if="decodeResult" class="result-card success decode-results"><p class="result-count">{{ t("decodeResultCount", { count: decodeResult.items.length }) }}</p><article v-for="(item, index) in decodeResult.items" :key="item.inputPath" class="decode-item"><div class="decode-title"><strong>{{ index + 1 }}. {{ basename(item.inputPath) }}</strong><span :class="['integrity', item.integrity]">{{ integrityLabel(item.integrity) }}</span></div><p class="watermark-output">{{ item.text }}</p><small class="path-line">{{ item.inputPath }}</small><small v-if="item.mediaType === 'image'">{{ t("fingerprintDistance") }} {{ item.fingerprintDistance ?? "-" }} · {{ t("correctedCodewords") }} {{ item.correctedCodewords }}</small><small v-else>{{ t("validFrames") }} {{ item.validFrames ?? 0 }}/{{ item.frameCount ?? 0 }} · {{ t("modifiedFrames") }} {{ item.modifiedFrames ?? 0 }}</small><small v-if="item.syncRegistration">{{ t("syncRegistration") }} {{ item.syncRegistration.rotationDegrees }}° / ×{{ item.syncRegistration.scale.toFixed(2) }} / {{ item.syncRegistration.score.toFixed(2) }}</small><small v-if="item.tamperRegions.length">{{ t("tamperRegions") }} {{ item.tamperRegions.length }}</small></article></div><p v-else class="empty-state">{{ t("waitingDecode") }}</p></article>
     </section>
 
     <section v-else-if="activeTab === 'scan'" class="panel panel-grid scan-grid">
-      <article class="card action-card"><div class="section-heading"><span>01</span><div><h2>{{ t("importUnknown") }}</h2><p>{{ t("importUnknownDesc") }}</p></div></div><button class="file-picker tall" @click="chooseScanInputs"><strong>{{ t("chooseUnknown") }}</strong><span>{{ scanInputs.length ? t("selectedFiles", { count: scanInputs.length }) : t("unknownHint") }}</span></button><div v-if="scanInputs.length" class="import-summary"><div class="import-summary-head"><small>{{ t("currentImport") }}</small><button type="button" :disabled="busy" @click="clearScanInputs">{{ t("clearImportedFiles") }}</button></div><div class="file-list inline-list"><span v-for="name in previewNames(scanInputs)" :key="name">{{ name }}</span><span v-if="restCount(scanInputs)">+{{ restCount(scanInputs) }}</span></div></div><div class="task-actions"><button class="primary" :disabled="!canScan || busy" @click="runScan">{{ busy ? t("scanning") : t("scanWatermark") }}</button><button v-if="showProgress('scan') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div><div v-if="showProgress('scan')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ progressPhaseLabel(taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}：{{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressCounter") }}：{{ taskProgress.current }}/{{ taskProgress.total }}</small><small v-if="taskProgress?.message">{{ taskProgress.message }}</small></div><p class="hint-text">{{ t("scanHint") }}</p></article>
+      <article class="card action-card"><div class="section-heading"><span>01</span><div><h2>{{ t("importUnknown") }}</h2><p>{{ t("importUnknownDesc") }}</p></div></div><button class="file-picker tall" @click="chooseScanInputs"><strong>{{ t("chooseUnknown") }}</strong><span>{{ scanInputs.length ? t("selectedFiles", { count: scanInputs.length }) : t("unknownHint") }}</span></button><div v-if="scanInputs.length" class="import-summary"><div class="import-summary-head"><small>{{ t("currentImport") }}</small><button type="button" :disabled="busy" @click="clearScanInputs">{{ t("clearImportedFiles") }}</button></div><div class="file-list inline-list"><span v-for="name in previewNames(scanInputs)" :key="name">{{ name }}</span><span v-if="restCount(scanInputs)">+{{ restCount(scanInputs) }}</span></div></div><div class="task-actions"><button class="primary" :disabled="!canScan || busy" @click="runScan">{{ busy ? t("scanning") : t("scanWatermark") }}</button><button v-if="showProgress('scan') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div><div v-if="showProgress('scan')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ progressPhaseLabel(taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}: {{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressCounter") }}: {{ taskProgress.current }}/{{ taskProgress.total }}</small><small v-if="displayProgressMessage">{{ displayProgressMessage }}</small></div><p class="hint-text">{{ t("scanHint") }}</p></article>
       <article class="card result-panel wide-result"><div class="section-heading"><span>02</span><div><h2>{{ t("scanFeedback") }}</h2><p>{{ t("scanFeedbackDesc") }}</p></div></div><div v-if="scanResult" class="scan-results"><article v-for="item in scanResult.items" :key="item.inputPath" class="scan-item"><div class="decode-title"><strong>{{ basename(item.inputPath) }}</strong><span :class="['scan-status', item.status]">{{ item.status === "detected" ? t("foundTrace") : t("notDetected") }}</span></div><p class="scan-summary">{{ item.summary }}</p><small v-if="item.width && item.height">{{ t("imageSize") }} {{ item.width }}×{{ item.height }}</small><div v-if="item.detections.length" class="detection-list"><article v-for="detection in item.detections" :key="`${detection.detector}-${detection.label}`"><div><strong>{{ detection.label }}</strong><span>{{ detection.confidence }} · {{ detectionAccessLabel(detection) }}</span></div><p>{{ detection.content }}</p></article></div></article></div><p v-else class="empty-state">{{ t("waitingScan") }}</p></article>
     </section>
 
     <section v-else class="panel panel-grid ffmpeg-grid">
       <article class="card runtime-card"><div class="section-heading"><span>FF</span><div><h2>{{ t("runtimeStatus") }}</h2><p>{{ t("runtimeStatusDesc") }}</p></div></div><div :class="['runtime-overview', ffmpegStatus.className]"><div><strong>{{ ffmpegStatus.label }}</strong><span>{{ ffmpegStatus.detail }}</span></div><button class="secondary-button" type="button" @click="loadFfmpegInfo">{{ t("refresh") }}</button></div><div v-if="ffmpegInfo" class="ffmpeg-meta status-grid"><p><strong>{{ t("platform") }}</strong><span>{{ ffmpegInfo.platform }}</span></p><p><strong>{{ t("ffmpegBuild") }}</strong><span>{{ ffmpegInfo.version }}</span></p><p><strong>{{ t("utcCompileDate") }}</strong><span>{{ ffmpegInfo.utcCompileDate || t("undeclared") }}</span></p><p><strong>{{ t("licenseJudgement") }}</strong><span>{{ ffmpegInfo.buildLicense }}</span></p><p><strong>{{ t("manifestTime") }}</strong><span>{{ ffmpegInfo.generatedAt || t("notGenerated") }}</span></p><p><strong>{{ t("sourceDesc") }}</strong><span>{{ ffmpegInfo.source }}</span></p></div><div v-if="releaseInfo" class="ffmpeg-meta status-grid"><p><strong>{{ t("autoUpdate") }}</strong><span>{{ releaseInfo.automaticUpdate ? t("enabled") : t("disabled") }}</span></p><p><strong>{{ t("updateManifest") }}</strong><span>{{ releaseInfo.manifestUrl || t("notGenerated") }}</span></p><p><strong>{{ t("packageSignature") }}</strong><span>{{ releaseInfo.packageSigning.signature || t("notGenerated") }}</span></p></div><div v-else-if="ffmpegError" class="status-card error"><strong>{{ t("ffmpegResourceFailed") }}</strong><p>{{ ffmpegError }}</p></div></article>
-      <article class="card result-panel"><div class="section-heading"><span>SHA</span><div><h2>{{ t("binaryHash") }}</h2><p>{{ t("binaryHashDesc") }}</p></div></div><div v-if="ffmpegBinaries.length" class="binary-list"><article v-for="binary in ffmpegBinaries" :key="binary.name" class="binary-card"><div class="decode-title"><strong>{{ binary.name }}</strong><span :class="['scan-status', binary.hashOk ? 'not_detected' : 'detected']">{{ binary.hashOk ? t("hashOk") : t("hashNeedsFix") }}</span></div><p class="mono">{{ binary.versionLine || t("versionLineMissing") }}</p><small>{{ t("path") }}：{{ binary.path }}</small><small>{{ t("expectedSha") }}：{{ binary.expectedSha256 || t("notGenerated") }}</small><small>{{ t("actualSha") }}：{{ binary.actualSha256 || t("notRead") }}</small><small v-if="binary.error" class="error-text binary-error">{{ binary.error }}</small></article></div><p v-else class="empty-state">{{ t("noCurrentBinary") }}</p></article>
+      <article class="card result-panel"><div class="section-heading"><span>SHA</span><div><h2>{{ t("binaryHash") }}</h2><p>{{ t("binaryHashDesc") }}</p></div></div><div v-if="ffmpegBinaries.length" class="binary-list"><article v-for="binary in ffmpegBinaries" :key="binary.name" class="binary-card"><div class="decode-title"><strong>{{ binary.name }}</strong><span :class="['scan-status', binary.hashOk ? 'not_detected' : 'detected']">{{ binary.hashOk ? t("hashOk") : t("hashNeedsFix") }}</span></div><p class="mono">{{ binary.versionLine || t("versionLineMissing") }}</p><small>{{ t("path") }}: {{ binary.path }}</small><small>{{ t("expectedSha") }}: {{ binary.expectedSha256 || t("notGenerated") }}</small><small>{{ t("actualSha") }}: {{ binary.actualSha256 || t("notRead") }}</small><small v-if="binary.error" class="error-text binary-error">{{ binary.error }}</small></article></div><p v-else class="empty-state">{{ t("noCurrentBinary") }}</p></article>
       <article class="card result-panel"><div class="section-heading"><span>LIC</span><div><h2>{{ t("licenseBuild") }}</h2><p>{{ t("licenseBuildDesc") }}</p></div></div><div v-if="ffmpegInfo" class="license-box"><h3>{{ t("buildParams") }}</h3><p class="mono">{{ ffmpegInfo.buildConfigure }}</p><h3>{{ t("licenseOutput") }}</h3><pre>{{ ffmpegInfo.licenseText }}</pre></div><p v-else class="empty-state">{{ t("waitingFfmpeg") }}</p></article>
     </section>
 
     <div v-if="errorMessage" class="error-box" role="alert">
       <div class="error-box-head">
         <strong>{{ t("failure") }}</strong>
-        <button type="button" aria-label="关闭失败提醒" @click="errorMessage = ''">×</button>
+        <button type="button" :aria-label="t('closeFailure')" @click="errorMessage = ''">×</button>
       </div>
-      <p>{{ errorMessage }}</p>
+      <p>{{ displayErrorMessage }}</p>
     </div>
 
     <footer>

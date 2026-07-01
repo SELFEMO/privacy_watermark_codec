@@ -70,11 +70,7 @@ struct BinaryManifest {
 
 pub fn bundled_tools(app: &AppHandle) -> Result<FfmpegTools, String> {
     let manifest = load_manifest(app)?;
-    let platform = platform_key()?;
-    let platform_entry = manifest
-        .platforms
-        .get(platform)
-        .ok_or_else(|| format!("当前平台未在 FFmpeg 清单中配置：{platform}"))?;
+    let (platform, platform_entry) = resolve_platform_entry(&manifest)?;
 
     let ffmpeg = verified_binary_path(app, platform, "ffmpeg", &platform_entry.ffmpeg)?;
     let ffprobe = verified_binary_path(app, platform, "ffprobe", &platform_entry.ffprobe)?;
@@ -90,8 +86,11 @@ pub async fn get_ffmpeg_info(app: AppHandle) -> Result<FfmpegRuntimeInfo, String
 
 fn get_ffmpeg_info_blocking(app: AppHandle) -> Result<FfmpegRuntimeInfo, String> {
     let manifest = load_manifest(&app)?;
-    let platform = platform_key()?.to_owned();
-    let platform_entry = manifest.platforms.get(&platform);
+    let platform_result = resolve_platform_entry(&manifest);
+    let (platform, platform_entry) = match platform_result {
+        Ok((platform, entry)) => (platform.to_owned(), Some(entry)),
+        Err(_) => (primary_platform_key()?.to_owned(), None),
+    };
 
     let ffmpeg = platform_entry
         .map(|entry| binary_info(&app, &platform, "ffmpeg", &entry.ffmpeg))
@@ -149,6 +148,7 @@ fn verified_binary_path(
     manifest: &BinaryManifest,
 ) -> Result<PathBuf, String> {
     let path = resolve_binary_path(app, platform, manifest)?;
+    ensure_binary_executable(&path)?;
     let actual = sha256_file(&path)?;
 
     match validate_expected_hash(name, &manifest.sha256) {
@@ -183,6 +183,7 @@ fn binary_info(
     manifest: &BinaryManifest,
 ) -> Result<FfmpegBinaryInfo, String> {
     let path = resolve_binary_path(app, platform, manifest)?;
+    let executable_result = ensure_binary_executable(&path);
     let actual_result = sha256_file(&path);
     let actual = actual_result.clone().unwrap_or_default();
     let expected_is_valid = validate_expected_hash(name, &manifest.sha256).is_ok();
@@ -202,7 +203,9 @@ fn binary_info(
     } else {
         String::new()
     };
-    let error = if actual_result.is_err() {
+    let error = if executable_result.is_err() {
+        executable_result.err()
+    } else if actual_result.is_err() {
         actual_result.err()
     } else if expected_is_valid {
         None
@@ -333,6 +336,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 }
 
 fn command_text(path: &Path, arg: &str) -> Result<String, String> {
+    ensure_binary_executable(path)?;
     let output = hidden_command(path)
         .arg(arg)
         .output()
@@ -344,26 +348,55 @@ fn command_text(path: &Path, arg: &str) -> Result<String, String> {
     Ok(text.trim().to_owned())
 }
 
+#[cfg(unix)]
+fn ensure_binary_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("无法读取 FFmpeg 文件权限 {}：{error}", path.display()))?;
+    let mode = metadata.permissions().mode();
+    if mode & 0o755 == 0o755 {
+        return Ok(());
+    }
+
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(mode | 0o755);
+    // macOS/Linux 运行前再次修复可执行位，是为了防止 Git LFS、压缩包或资源复制过程把 FFmpeg 变成普通文件。
+    // The executable bit is fixed again at runtime on macOS/Linux because Git LFS, archives, or resource copying may turn FFmpeg into a regular non-executable file.
+    fs::set_permissions(path, permissions)
+        .map_err(|error| format!("无法设置 FFmpeg 可执行权限 {}：{error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn ensure_binary_executable(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn hidden_command(program: &Path) -> Command {
     let mut command = Command::new(program);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        // 后台探测 FFmpeg 时不创建控制台窗口，避免用户在图形界面操作时看到命令行一闪而过。
-        // FFmpeg probing is started without a console window so GUI users do not see a flashing command prompt.
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    // 后台探测 FFmpeg 时不创建控制台窗口，避免用户在图形界面操作时看到命令行一闪而过。
+    // FFmpeg probing is started without a console window so GUI users do not see a flashing command prompt.
+    command.creation_flags(CREATE_NO_WINDOW);
     command
 }
 
-fn platform_key() -> Result<&'static str, String> {
+#[cfg(not(target_os = "windows"))]
+fn hidden_command(program: &Path) -> Command {
+    // 非 Windows 平台没有 creation_flags，直接返回 Command 可以避免 macOS/Linux 构建产生无意义的 mut warning。
+    // Non-Windows platforms do not use creation_flags, so returning Command directly avoids a meaningless mut warning on macOS/Linux builds.
+    Command::new(program)
+}
+
+fn primary_platform_key() -> Result<&'static str, String> {
     if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         Ok("windows_x64")
     } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
         Ok("windows_arm64")
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        Ok("macos_x64")
+        Ok("macos_amd64")
     } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Ok("macos_arm64")
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
@@ -373,4 +406,41 @@ fn platform_key() -> Result<&'static str, String> {
     } else {
         Err("当前平台暂未配置内置 FFmpeg".into())
     }
+}
+
+fn platform_key_candidates() -> Result<Vec<&'static str>, String> {
+    let primary = primary_platform_key()?;
+    let candidates = match primary {
+        // macOS x64 与 macOS amd64 指同一架构，兼容两个目录名可以避免旧仓库或不同平台习惯导致运行时找不到 FFmpeg。
+        // macOS x64 and macOS amd64 describe the same architecture, so supporting both directory names prevents runtime misses across repository revisions.
+        "macos_amd64" => vec!["macos_amd64", "macos_x64"],
+        "macos_x64" => vec!["macos_x64", "macos_amd64"],
+        "linux_x64" => vec!["linux_x64", "linux_amd64"],
+        "linux_amd64" => vec!["linux_amd64", "linux_x64"],
+        other => vec![other],
+    };
+    Ok(candidates)
+}
+
+fn resolve_platform_entry<'a>(manifest: &'a FfmpegManifest) -> Result<(&'static str, &'a PlatformManifest), String> {
+    let candidates = platform_key_candidates()?;
+
+    for platform in &candidates {
+        if let Some(entry) = manifest.platforms.get(*platform) {
+            if !entry.ffmpeg.sha256.trim().is_empty() && !entry.ffprobe.sha256.trim().is_empty() {
+                return Ok((*platform, entry));
+            }
+        }
+    }
+
+    for platform in &candidates {
+        if let Some(entry) = manifest.platforms.get(*platform) {
+            return Ok((*platform, entry));
+        }
+    }
+
+    Err(format!(
+        "当前平台未在 FFmpeg 清单中配置：{}",
+        candidates.join(" / ")
+    ))
 }

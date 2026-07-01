@@ -16,7 +16,7 @@ Official FFmpeg download page:
 https://ffmpeg.org/download.html
 ```
 
-The official download page mainly provides source code and links to compiled package providers. You may use files already stored in this repository, download compiled binaries from the providers listed by FFmpeg, or compile FFmpeg yourself. The only requirement for this project is that the final filenames and directories match the layout below.
+The official download page mainly provides source code and links to compiled package providers. You may use files already stored in this repository, download compiled binaries from the providers listed by FFmpeg, or compile FFmpeg yourself. The only requirement for this project is that the final filenames and directories match the layout below. `macos_amd64` and `macos_x64` are treated as compatible Intel Mac aliases.
 
 Required layout:
 
@@ -27,6 +27,8 @@ windows_arm64/ffmpeg.exe
 windows_arm64/ffprobe.exe
 macos_arm64/ffmpeg
 macos_arm64/ffprobe
+macos_amd64/ffmpeg
+macos_amd64/ffprobe
 macos_x64/ffmpeg
 macos_x64/ffprobe
 linux_x64/ffmpeg
