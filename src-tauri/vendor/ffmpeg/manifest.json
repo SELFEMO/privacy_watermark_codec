@@ -1,9 +1,9 @@
 {
-  "version": "ffmpeg version n8.1.2-3-gdba917bab5-20260629 Copyright (c) 2000-2026 the FFmpeg developers",
+  "version": "ffmpeg version 8.1.1-https://www.martin-riedl.de Copyright (c) 2000-2026 the FFmpeg developers",
   "source": "Bundled FFmpeg binaries stored under src-tauri/vendor/ffmpeg. Keep upstream download URL, source URL, license files, and build notes together with this project.",
   "buildLicense": "GPL-2.0-or-later-build-check-required",
-  "buildConfigure": "--prefix=/ffbuild/prefix --pkg-config-flags=--static --pkg-config=pkg-config --cross-prefix=x86_64-w64-mingw32- --arch=x86_64 --target-os=mingw32 --enable-gpl --enable-version3 --disable-debug --disable-w32threads --enable-pthreads --enable-iconv --enable-zlib --enable-libxml2 --enable-libvmaf --enable-fontconfig --enable-libharfbuzz --enable-libfreetype --enable-libfribidi --enable-vulkan --enable-libshaderc --enable-libvorbis --disable-libxcb --disable-xlib --disable-libpulse --enable-gmp --enable-lzma --enable-liblcevc-dec --enable-opencl --enable-amf --enable-libaom --enable-libaribb24 --enable-avisynth --enable-chromaprint --enable-libdav1d --enable-libdavs2 --enable-libdvdread --enable-libdvdnav --disable-libfdk-aac --enable-ffnvcodec --enable-cuda-llvm --enable-frei0r --enable-libgme --enable-libkvazaar --enable-libaribcaption --enable-libass --enable-libbluray --enable-libjxl --enable-libmp3lame --enable-libopus --enable-libplacebo --enable-librist --enable-libssh --enable-libtheora --enable-libvpx --enable-libwebp --enable-libzmq --enable-lv2 --enable-libvpl --enable-openal --enable-liboapv --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libopenh264 --enable-libopenjpeg --enable-libopenmpt --enable-librav1e --enable-librubberband --enable-schannel --enable-sdl2 --enable-libsnappy --enable-libsoxr --enable-libsrt --enable-libsvtav1 --enable-libtwolame --enable-libuavs3d --disable-libdrm --enable-vaapi --enable-libvidstab --enable-libvvenc --disable-whisper --enable-libx264 --enable-libx265 --enable-libxavs2 --enable-libxvid --enable-libzimg --enable-libzvbi --extra-cflags=-DLIBTWOLAME_STATIC --extra-cxxflags= --extra-libs=-lgomp --extra-ldflags=-pthread --extra-ldexeflags= --cc=x86_64-w64-mingw32-gcc --cxx=x86_64-w64-mingw32-g++ --ar=x86_64-w64-mingw32-gcc-ar --ranlib=x86_64-w64-mingw32-gcc-ranlib --nm=x86_64-w64-mingw32-gcc-nm --extra-version=20260629",
-  "generatedAt": "2026-07-02T04:53:51.332Z",
+  "buildConfigure": "--prefix=/Volumes/ffmpeg_arm64/out --pkg-config-flags=--static --extra-version='https://www.martin-riedl.de' --enable-gray --enable-libxml2 --enable-version3 --enable-gpl --enable-openssl --enable-libfreetype --enable-fontconfig --enable-libharfbuzz --enable-libsnappy --enable-libsrt --enable-libvmaf --enable-libass --enable-libklvanc --enable-libzimg --enable-libzvbi --enable-libaom --enable-libdav1d --enable-libopenh264 --enable-libopenjpeg --enable-librav1e --enable-libsvtav1 --enable-libvpx --enable-libvvenc --enable-libwebp --enable-libx264 --enable-libx265 --enable-libmp3lame --enable-libopus --enable-libvorbis --enable-libtheora",
+  "generatedAt": "2026-07-02T05:23:56.198Z",
   "platforms": {
     "windows_x64": {
       "ffmpeg": {
@@ -64,15 +64,15 @@
     "macos_arm64": {
       "ffmpeg": {
         "file": "ffmpeg",
-        "sha256": "2ce81b92499c1b6b96eb060c69723114bd0da13f1bfbd9da26dee24d099e644a"
+        "sha256": "ef4fe121377039053b0d7bed4a9aa46e7912918f5ba6424a1dd155f4eed625b0"
       },
       "ffprobe": {
         "file": "ffprobe",
-        "sha256": "c806a3513d745902058911abf087d7dd26bcc7c1e62e5133e36a37eb42ae72b0"
+        "sha256": "3ec76ddd72068162294249465c36257d6c1add564f9b078e31e173837832967d"
       },
       "ffplay": {
         "file": "ffplay",
-        "sha256": "31af69e723ab006cc2edbbe7a0ce0c36a188d9273703223d17a0314700ba8127"
+        "sha256": "17588728975298bb1342998abc6b1b67aae724ef6fa254b1df2e8e3d9b07db3c"
       }
     },
     "linux_x64": {
