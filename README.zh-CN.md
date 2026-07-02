@@ -163,6 +163,7 @@ npm run tauri:build
 npm run tauri:build:windows:nsis
 npm run tauri:build:windows:x64
 npm run tauri:build:windows:amd64
+npm run tauri:build:windows:arm64
 npm run tauri:build:macos
 npm run tauri:build:macos:x64
 npm run tauri:build:macos:amd64
@@ -171,6 +172,14 @@ npm run tauri:build:linux
 npm run tauri:build:linux:x64
 npm run tauri:build:linux:amd64
 ```
+
+构建 Windows ARM64 安装包前，先安装对应 Rust 目标：
+
+```text
+rustup target add aarch64-pc-windows-msvc
+npm run tauri:build:windows:arm64
+```
+
 
 架构别名已统一支持。`x64`、`amd64`、`x86_64` 都指 Intel/AMD 64 位目标命名体系；面向用户的 npm 命令保留 `x64` 别名，部分内部目录名继续保留 `amd64`，用于兼容之前的资源目录。
 

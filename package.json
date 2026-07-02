@@ -19,6 +19,7 @@
     "tauri:build:windows:nsis": "node scripts/build-release.mjs nsis",
     "tauri:build:windows:x64": "node scripts/build-release.mjs nsis --arch x64",
     "tauri:build:windows:amd64": "node scripts/build-release.mjs nsis --arch amd64",
+    "tauri:build:windows:arm64": "node scripts/build-release.mjs nsis --arch arm64",
     "tauri:build:windows:msi": "node scripts/build-release.mjs msi",
     "tauri:build:macos": "node scripts/build-release.mjs app",
     "tauri:build:macos:amd64": "node scripts/build-release.mjs app --target x86_64-apple-darwin",
