@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, renameSync, unlinkSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, renameSync, unlinkSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -101,6 +101,73 @@ function renameBundleFiles() {
   }
 }
 
+function targetFfmpegResourceDirectories(platform) {
+  switch (platform) {
+    case "windows_x64":
+      return ["windows_x64"];
+    case "windows_arm64":
+      return ["windows_arm64"];
+    case "macos_arm64":
+      return ["macos_arm64"];
+    case "macos_amd64":
+      return ["macos_amd64"];
+    case "macos_x64":
+      return ["macos_x64"];
+    case "linux_arm64":
+      return ["linux_arm64"];
+    case "linux_x64":
+      return ["linux_x64"];
+    case "linux_amd64":
+      return ["linux_amd64"];
+    default:
+      return [];
+  }
+}
+
+function targetBundleResources(platform) {
+  const common = [
+    "vendor/ffmpeg/manifest.json",
+    "vendor/ffmpeg/LICENSE.txt",
+    "vendor/ffmpeg/README.md",
+    "vendor/ffmpeg/VERSION.txt",
+  ];
+
+  return [
+    ...common,
+    ...targetFfmpegResourceDirectories(platform).map((directory) => `vendor/ffmpeg/${directory}/*`),
+  ];
+}
+
+function isFfmpegResource(entry) {
+  if (typeof entry === "string") {
+    return entry.replace(/\\/g, "/").includes("vendor/ffmpeg/");
+  }
+  return JSON.stringify(entry).includes("vendor/ffmpeg/");
+}
+
+function patchTauriResourcesForTarget(platform) {
+  if (!platform) {
+    return () => {};
+  }
+
+  const original = readFileSync(configPath, "utf8");
+  const config = JSON.parse(original);
+  const currentResources = Array.isArray(config.bundle?.resources) ? config.bundle.resources : [];
+  const nonFfmpegResources = currentResources.filter((entry) => !isFfmpegResource(entry));
+  const resources = [...nonFfmpegResources, ...targetBundleResources(platform)];
+
+  config.bundle = { ...(config.bundle || {}), resources };
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}
+`);
+
+  console.log(`Bundling FFmpeg resources for target platform only: ${platform}`);
+  for (const resource of resources.filter((entry) => isFfmpegResource(entry))) {
+    console.log(`  ${resource}`);
+  }
+
+  return () => writeFileSync(configPath, original);
+}
+
 const nodePath = process.execPath;
 const manifestScript = join(projectRoot, "scripts", "generate-ffmpeg-manifest.mjs");
 const preflightScript = join(projectRoot, "scripts", "preflight-tauri.mjs");
@@ -124,8 +191,10 @@ if (targetPlatform) {
 
 await run(nodePath, [preflightScript]);
 await run(nodePath, manifestArgs);
+const restoreTauriResources = patchTauriResourcesForTarget(targetPlatform);
 try {
   await run(tauriBin, tauriArgs, true);
+  renameBundleFiles();
 } catch (error) {
   if (process.platform === "darwin" && bundle.split(",").map((item) => item.trim()).includes("dmg")) {
     const targetRoot = targetTriple ? join(projectRoot, "target", targetTriple, "release") : join(projectRoot, "target", "release");
@@ -138,5 +207,8 @@ try {
     console.error("To debug DMG generation, run the generated bundle_dmg.sh manually with bash -x.");
   }
   throw error;
+} finally {
+  // 只在打包期间临时收窄 bundle.resources，仓库仍保留全平台 FFmpeg 资源，避免构建后留下配置改动。
+  // bundle.resources is narrowed only during packaging; the repository still keeps all-platform FFmpeg resources without leaving config changes after builds.
+  restoreTauriResources();
 }
-renameBundleFiles();

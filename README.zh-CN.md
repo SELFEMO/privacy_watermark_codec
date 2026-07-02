@@ -167,6 +167,35 @@ npm run tauri:build:macos:arm64
 npm run tauri:build:linux
 ```
 
+### 打包资源策略
+
+仓库仍然保留全平台 FFmpeg 资源，便于在不同机器或 CI 环境中构建 Windows、macOS 和 Linux 版本。正式打包时，`scripts/build-release.mjs` 会根据当前构建目标临时收窄 `bundle.resources`，只把目标平台所需的 FFmpeg 目录放入安装包；构建结束后会自动恢复 `src-tauri/tauri.conf.json`，因此正常情况下 `git status` 不会因为打包而残留配置变更。
+
+例如：
+
+```text
+npm run tauri:build:windows:nsis
+```
+
+安装包只会包含公共清单、许可证文件和：
+
+```text
+src-tauri/vendor/ffmpeg/windows_x64/
+```
+
+不会再把 `macos_arm64`、`macos_amd64`、`macos_x64`、`linux_x64` 等其他平台 FFmpeg 一起打进去。
+
+```text
+npm run tauri:build:macos:arm64
+```
+
+则只会包含：
+
+```text
+src-tauri/vendor/ffmpeg/macos_arm64/
+```
+
+直接运行原始 `tauri build` 可能不会应用这个动态资源收窄逻辑，发布构建请优先使用 `package.json` 中的 `npm run tauri:build...` 脚本。
 
 ### 在 Apple Silicon Mac 上构建 Intel Mac 版本
 

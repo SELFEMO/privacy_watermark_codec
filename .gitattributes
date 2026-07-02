@@ -1,13 +1,9 @@
 # Store bundled FFmpeg runtime binaries in Git LFS, including executable files without extensions.
+src-tauri/vendor/ffmpeg/** filter=lfs diff=lfs merge=lfs -text
+
 # Keep small metadata and placeholder files as normal Git text so clone/download instructions remain readable without Git LFS.
 src-tauri/vendor/ffmpeg/README.md -filter -diff -merge text eol=lf
 src-tauri/vendor/ffmpeg/LICENSE.txt -filter -diff -merge text eol=lf
 src-tauri/vendor/ffmpeg/VERSION.txt -filter -diff -merge text eol=lf
 src-tauri/vendor/ffmpeg/manifest.json -filter -diff -merge text eol=lf
 src-tauri/vendor/ffmpeg/**/.gitkeep -filter -diff -merge text eol=lf
-src-tauri/vendor/ffmpeg/**/ffmpeg filter=lfs diff=lfs merge=lfs -text
-src-tauri/vendor/ffmpeg/**/ffmpeg.exe filter=lfs diff=lfs merge=lfs -text
-src-tauri/vendor/ffmpeg/**/ffprobe filter=lfs diff=lfs merge=lfs -text
-src-tauri/vendor/ffmpeg/**/ffprobe.exe filter=lfs diff=lfs merge=lfs -text
-src-tauri/vendor/ffmpeg/**/ffplay filter=lfs diff=lfs merge=lfs -text
-src-tauri/vendor/ffmpeg/**/ffplay.exe filter=lfs diff=lfs merge=lfs -text

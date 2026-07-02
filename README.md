@@ -167,6 +167,35 @@ npm run tauri:build:macos:arm64
 npm run tauri:build:linux
 ```
 
+### Packaging resource policy
+
+The repository still keeps FFmpeg resources for all supported platforms so Windows, macOS, and Linux packages can be built on matching machines or in CI. During release packaging, `scripts/build-release.mjs` temporarily narrows `bundle.resources` according to the target platform, so the installer only includes the FFmpeg directory required by that target. After the build finishes, `src-tauri/tauri.conf.json` is restored automatically, so packaging should not leave configuration changes in `git status`.
+
+For example:
+
+```text
+npm run tauri:build:windows:nsis
+```
+
+The installer includes only the common manifest/license files and:
+
+```text
+src-tauri/vendor/ffmpeg/windows_x64/
+```
+
+It no longer bundles unrelated FFmpeg directories such as `macos_arm64`, `macos_amd64`, `macos_x64`, or `linux_x64`.
+
+```text
+npm run tauri:build:macos:arm64
+```
+
+includes only:
+
+```text
+src-tauri/vendor/ffmpeg/macos_arm64/
+```
+
+Running raw `tauri build` directly may bypass this dynamic resource narrowing. For release builds, use the `npm run tauri:build...` scripts defined in `package.json`.
 
 ### Build an Intel Mac package on an Apple Silicon Mac
 

@@ -120,25 +120,29 @@ fn make_destination_writable(destination: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn ensure_runtime_file_permissions(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            return Ok(());
-        };
-        if matches!(file_name, "ffmpeg" | "ffprobe" | "ffplay") {
-            let metadata = fs::metadata(path)?;
-            let mode = metadata.permissions().mode();
-            if mode & 0o755 != 0o755 {
-                let mut permissions = metadata.permissions();
-                // 复制到 target 后补齐执行位和 owner 写入位，保证开发热重载与后续复制都能继续覆盖该文件。
-                // After copying into target, executable and owner-write bits are restored so dev reloads and later copies can overwrite the file.
-                permissions.set_mode(mode | 0o755);
-                fs::set_permissions(path, permissions)?;
-            }
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    if matches!(file_name, "ffmpeg" | "ffprobe" | "ffplay") {
+        let metadata = fs::metadata(path)?;
+        let mode = metadata.permissions().mode();
+        if mode & 0o755 != 0o755 {
+            let mut permissions = metadata.permissions();
+            // 复制到 target 后补齐执行位和 owner 写入位，保证开发热重载与后续复制都能继续覆盖该文件。
+            // After copying into target, executable and owner-write bits are restored so dev reloads and later copies can overwrite the file.
+            permissions.set_mode(mode | 0o755);
+            fs::set_permissions(path, permissions)?;
         }
     }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_runtime_file_permissions(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
