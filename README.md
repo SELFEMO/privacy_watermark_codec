@@ -161,11 +161,18 @@ Build a specific platform target:
 
 ```text
 npm run tauri:build:windows:nsis
+npm run tauri:build:windows:x64
+npm run tauri:build:windows:amd64
 npm run tauri:build:macos
+npm run tauri:build:macos:x64
 npm run tauri:build:macos:amd64
 npm run tauri:build:macos:arm64
 npm run tauri:build:linux
+npm run tauri:build:linux:x64
+npm run tauri:build:linux:amd64
 ```
+
+Architecture aliases are supported consistently. `x64`, `amd64`, and `x86_64` refer to the same Intel/AMD 64-bit target naming family. The `x64` scripts are kept as user-facing aliases, while some internal directory names still use `amd64` for compatibility with earlier releases.
 
 ### Packaging resource policy
 

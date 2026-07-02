@@ -6,9 +6,39 @@ import { fileURLToPath } from "node:url";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const configPath = join(projectRoot, "src-tauri", "tauri.conf.json");
 const args = process.argv.slice(2);
-const targetIndex = args.indexOf("--target");
-const targetTriple = targetIndex >= 0 ? args[targetIndex + 1] : null;
-const requestedBundle = args.find((arg, index) => index !== targetIndex && index !== targetIndex + 1 && !arg.startsWith("--"));
+
+function optionValue(name) {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : null;
+}
+
+const explicitTargetTriple = optionValue("--target");
+const archAlias = optionValue("--arch");
+
+function targetTripleFromArchAlias(alias) {
+  if (!alias) return null;
+  const normalized = alias.toLowerCase();
+  const isX64 = normalized === "x64" || normalized === "amd64" || normalized === "x86_64";
+  const isArm64 = normalized === "arm64" || normalized === "aarch64";
+  if (!isX64 && !isArm64) {
+    throw new Error(`Unsupported architecture alias: ${alias}`);
+  }
+
+  if (process.platform === "win32") return isArm64 ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc";
+  if (process.platform === "darwin") return isArm64 ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
+  return isArm64 ? "aarch64-unknown-linux-gnu" : "x86_64-unknown-linux-gnu";
+}
+
+const targetTriple = explicitTargetTriple || targetTripleFromArchAlias(archAlias);
+const ignoredOptionIndexes = new Set();
+for (const name of ["--target", "--arch"]) {
+  const index = args.indexOf(name);
+  if (index >= 0) {
+    ignoredOptionIndexes.add(index);
+    ignoredOptionIndexes.add(index + 1);
+  }
+}
+const requestedBundle = args.find((arg, index) => !ignoredOptionIndexes.has(index) && !arg.startsWith("--"));
 
 function defaultBundleForPlatform() {
   if (process.platform === "win32") return "nsis";
