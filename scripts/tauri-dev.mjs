@@ -31,7 +31,8 @@ async function main() {
 
 function run(command, args, extraEnv = {}) {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, args, {
+    const invocation = normalizeSpawnInvocation(command, args);
+    const child = spawn(invocation.command, invocation.args, {
       cwd: projectRoot,
       windowsHide: true,
       env: { ...process.env, ...extraEnv },
@@ -50,6 +51,20 @@ function run(command, args, extraEnv = {}) {
       rejectRun(new Error(`${command} ${args.join(" ")} failed with ${signal || code}`));
     });
   });
+}
+
+function normalizeSpawnInvocation(command, args) {
+  const needsCommandShell = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command);
+  if (!needsCommandShell) {
+    return { command, args };
+  }
+
+  // Windows 不能像 Linux/macOS 那样稳定地把 .cmd/.bat 当作普通可执行文件直接 spawn；通过 ComSpec 转发可避免 npm.cmd 在部分 Node/Windows 组合下抛出 EINVAL。
+  // Windows cannot reliably spawn .cmd/.bat files as ordinary executables like Linux/macOS; forwarding through ComSpec avoids EINVAL from npm.cmd on some Node/Windows combinations.
+  return {
+    command: process.env.ComSpec || "cmd.exe",
+    args: ["/d", "/s", "/c", command, ...args],
+  };
 }
 
 function installSignalHandlers() {
