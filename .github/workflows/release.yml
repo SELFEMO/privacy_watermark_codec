@@ -39,3 +39,10 @@ jobs:
       - name: Build Windows installer
         shell: powershell
         run: npm run tauri:build
+
+      - name: Upload standardized release packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: privacy-watermark-codec-windows-x64
+          path: release/*
+          if-no-files-found: error

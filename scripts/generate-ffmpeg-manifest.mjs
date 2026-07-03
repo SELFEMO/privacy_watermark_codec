@@ -29,8 +29,8 @@ const versionPath = join(ffmpegRoot, "VERSION.txt");
 const platformDefinitions = {
   windows_x64: ["ffmpeg.exe", "ffprobe.exe", "ffplay.exe"],
   windows_arm64: ["ffmpeg.exe", "ffprobe.exe", "ffplay.exe"],
-  macos_amd64: ["ffmpeg", "ffprobe", "ffplay"],
   macos_x64: ["ffmpeg", "ffprobe", "ffplay"],
+  macos_amd64: ["ffmpeg", "ffprobe", "ffplay"],
   macos_arm64: ["ffmpeg", "ffprobe", "ffplay"],
   linux_x64: ["ffmpeg", "ffprobe", "ffplay"],
   linux_amd64: ["ffmpeg", "ffprobe", "ffplay"],
@@ -38,10 +38,10 @@ const platformDefinitions = {
 };
 
 const platformAliases = {
-  macos_amd64: ["macos_amd64", "macos_x64"],
   macos_x64: ["macos_x64", "macos_amd64"],
+  macos_amd64: ["macos_x64", "macos_amd64"],
   linux_x64: ["linux_x64", "linux_amd64"],
-  linux_amd64: ["linux_amd64", "linux_x64"],
+  linux_amd64: ["linux_x64", "linux_amd64"],
 };
 
 function sha256File(path) {
@@ -68,14 +68,14 @@ function ensureExecutable(path) {
 
 function currentPlatformKey() {
   if (process.platform === "win32") return process.arch === "arm64" ? "windows_arm64" : "windows_x64";
-  if (process.platform === "darwin") return process.arch === "arm64" ? "macos_arm64" : "macos_amd64";
+  if (process.platform === "darwin") return process.arch === "arm64" ? "macos_arm64" : "macos_x64";
   return process.arch === "arm64" ? "linux_arm64" : "linux_x64";
 }
 
 function platformKeyFromTargetTriple(targetTriple) {
   if (!targetTriple) return null;
   if (targetTriple.includes("apple-darwin")) {
-    return targetTriple.startsWith("aarch64") ? "macos_arm64" : "macos_amd64";
+    return targetTriple.startsWith("aarch64") ? "macos_arm64" : "macos_x64";
   }
   if (targetTriple.includes("pc-windows") || targetTriple.includes("windows")) {
     return targetTriple.startsWith("aarch64") ? "windows_arm64" : "windows_x64";
@@ -143,8 +143,8 @@ function bootstrapCurrentPlatformRuntimeFromPath(platform) {
 }
 
 function resolveRuntimePlatform(platform) {
-  // amd64 与 x64 只是命名习惯不同，按别名查找可以兼容用户已有目录，避免同一套 FFmpeg 被迫复制两份。
-  // amd64 and x64 are naming aliases, so looking up both keeps existing directories working without duplicating the same FFmpeg files.
+  // x64 是项目面向用户的标准目录名，amd64 仅作为 Debian/Ubuntu 包架构或历史目录别名保留，避免旧资源目录失效。
+  // x64 is the user-facing project directory name; amd64 is kept only as a Debian/Ubuntu package-architecture or legacy-directory alias so older runtime folders keep working.
   return candidatePlatformKeys(platform).find(platformHasRequiredRuntime) || platform;
 }
 

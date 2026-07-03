@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name={{name}} WM_CLASS Fallback
+Comment={{comment}}
+Exec={{exec}}
+Icon=com.privacywatermark.codec
+Terminal=false
+Categories={{categories}}
+StartupNotify=true
+StartupWMClass=privacy-watermark-codec
+X-GNOME-WMClass=privacy-watermark-codec
+NoDisplay=true
+SingleMainWindow=true

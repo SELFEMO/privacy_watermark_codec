@@ -1,0 +1,4 @@
+# 交叉编译 Linux arm64 时明确指定 GNU linker，避免 Rust 默认查找宿主 x64 linker 导致链接阶段失败。
+# When cross-compiling Linux arm64, the GNU linker is pinned so Rust does not fall back to the host x64 linker at link time.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"

@@ -1,1 +1,19 @@
-Overwrite these paths in the original project. Remove crates/watermark-core/src/hamming.rs after copying, because the ECC implementation has been upgraded to crates/watermark-core/src/bch.rs.
+Updated files in this package:
+- package.json
+- README.md
+- README.zh-CN.md
+- scripts/build-release.mjs
+- scripts/appimage-diagnostics.mjs
+- scripts/appimage-tools.mjs
+- scripts/appimage-prefetch.mjs
+- scripts/tauri-dev.mjs
+- scripts/linux-desktop-entry.mjs
+- src-tauri/tauri.conf.json
+- src-tauri/src/lib.rs
+- src-tauri/src/storage.rs
+- src-tauri/src/ffmpeg.rs
+- src-tauri/src/desktop_entry.rs
+- src-tauri/linux/desktop-template.desktop
+- src-tauri/linux/com.privacywatermark.codec.desktop
+- src-tauri/linux/package-postinstall.sh
+- src-tauri/linux/package-postremove.sh

@@ -32,9 +32,16 @@ fn mirror_ffmpeg_vendor_to_target() -> io::Result<()> {
     for platform in target_platform_keys() {
         let platform_source = source.join(platform);
         if platform_source.exists() {
+            let platform_destination = destination.join(platform);
+            if platform_destination.exists() {
+                // AppImage 打包会临时把源码 FFmpeg 替换成编码资源；先清空旧镜像可以避免 deb/rpm 构建遗留的原始 ELF 再次被 linuxdeploy 扫描。
+                // AppImage packaging temporarily replaces source FFmpeg with encoded resources; clearing the old mirror prevents raw ELF files left by deb/rpm builds from being scanned by linuxdeploy again.
+                fs::remove_dir_all(&platform_destination)?;
+            }
+
             // 构建脚本只复制目标平台相关运行时，避免跨平台打包时把无关 FFmpeg 二进制塞进当前产物。
             // The build script copies only target-platform runtime files so cross-platform packages do not carry unrelated FFmpeg binaries.
-            copy_dir_recursive(&platform_source, &destination.join(platform))?;
+            copy_dir_recursive(&platform_source, &platform_destination)?;
         }
     }
 

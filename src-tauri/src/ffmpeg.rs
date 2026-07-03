@@ -3,11 +3,13 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
 };
 use tauri::{path::BaseDirectory, AppHandle, Manager};
+
+use crate::storage;
 
 #[derive(Debug, Clone)]
 pub struct FfmpegTools {
@@ -67,6 +69,10 @@ struct BinaryManifest {
     file: String,
     sha256: String,
 }
+
+const ENCODED_FFMPEG_MAGIC: &[u8] = b"PWC_FFMPEG_XOR_V1\n";
+const ENCODED_FFMPEG_XOR_KEY: u8 = 0xA5;
+const FFMPEG_CACHE_DIR_NAME: &str = "ffmpeg-cache";
 
 pub fn bundled_tools(app: &AppHandle) -> Result<FfmpegTools, String> {
     let manifest = load_manifest(app)?;
@@ -245,7 +251,79 @@ fn resolve_binary_path(
     manifest: &BinaryManifest,
 ) -> Result<PathBuf, String> {
     let relative = format!("vendor/ffmpeg/{platform}/{}", manifest.file);
-    resolve_existing_resource_path(app, &relative)
+    if let Ok(path) = resolve_existing_resource_path(app, &relative) {
+        return Ok(path);
+    }
+
+    let encoded_relative = format!("{relative}.pwcbin");
+    let encoded_path = resolve_existing_resource_path(app, &encoded_relative).map_err(|raw_error| {
+        format!(
+            "未找到 FFmpeg 二进制 {relative}，也未找到 AppImage 编码资源 {encoded_relative}。原始错误：{raw_error}"
+        )
+    })?;
+    materialize_encoded_binary(platform, manifest, &encoded_path)
+}
+
+fn materialize_encoded_binary(
+    platform: &str,
+    manifest: &BinaryManifest,
+    encoded_path: &Path,
+) -> Result<PathBuf, String> {
+    let output_dir = storage::storage_root()
+        .map_err(|error| format!("无法确定 FFmpeg 缓存目录：{error}"))?
+        .join(FFMPEG_CACHE_DIR_NAME)
+        .join(platform);
+    fs::create_dir_all(&output_dir)
+        .map_err(|error| format!("无法创建 FFmpeg 缓存目录 {}：{error}", output_dir.display()))?;
+    let output_path = output_dir.join(&manifest.file);
+
+    if is_regular_file(&output_path) {
+        if let (Ok(()), Ok(actual)) = (validate_expected_hash(&manifest.file, &manifest.sha256), sha256_file(&output_path)) {
+            if actual == manifest.sha256.to_lowercase() {
+                ensure_binary_executable(&output_path)?;
+                return Ok(output_path);
+            }
+        }
+    }
+
+    let encoded = fs::read(encoded_path)
+        .map_err(|error| format!("无法读取 AppImage FFmpeg 编码资源 {}：{error}", encoded_path.display()))?;
+    if !encoded.starts_with(ENCODED_FFMPEG_MAGIC) {
+        return Err(format!(
+            "AppImage FFmpeg 编码资源格式不正确：{}",
+            encoded_path.display()
+        ));
+    }
+
+    let temporary_path = output_dir.join(format!("{}.tmp-{}", manifest.file, std::process::id()));
+    let mut output = fs::File::create(&temporary_path)
+        .map_err(|error| format!("无法创建 FFmpeg 临时文件 {}：{error}", temporary_path.display()))?;
+    for byte in &encoded[ENCODED_FFMPEG_MAGIC.len()..] {
+        output
+            .write_all(&[*byte ^ ENCODED_FFMPEG_XOR_KEY])
+            .map_err(|error| format!("无法写入 FFmpeg 临时文件 {}：{error}", temporary_path.display()))?;
+    }
+    drop(output);
+    ensure_binary_executable(&temporary_path)?;
+
+    // AppImage 打包时把 FFmpeg 资源编码为非 ELF 文件，是为了阻止 linuxdeploy 对大型预编译 FFmpeg 反复 patchelf 导致失败；运行时再还原到用户可写缓存。
+    // FFmpeg resources are encoded as non-ELF files for AppImage packaging to stop linuxdeploy from repeatedly patching large prebuilt FFmpeg binaries; they are restored into a writable user cache at runtime.
+    if output_path.exists() {
+        let _ = fs::remove_file(&output_path);
+    }
+    if let Err(rename_error) = fs::rename(&temporary_path, &output_path) {
+        fs::copy(&temporary_path, &output_path).map_err(|copy_error| {
+            format!(
+                "无法写入 FFmpeg 缓存文件 {}：rename 失败：{}；copy 失败：{}",
+                output_path.display(),
+                rename_error,
+                copy_error
+            )
+        })?;
+        let _ = fs::remove_file(&temporary_path);
+    }
+    ensure_binary_executable(&output_path)?;
+    Ok(output_path)
 }
 
 fn resolve_existing_resource_path(app: &AppHandle, resource: &str) -> Result<PathBuf, String> {
@@ -396,7 +474,7 @@ fn primary_platform_key() -> Result<&'static str, String> {
     } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
         Ok("windows_arm64")
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        Ok("macos_amd64")
+        Ok("macos_x64")
     } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Ok("macos_arm64")
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
@@ -411,12 +489,12 @@ fn primary_platform_key() -> Result<&'static str, String> {
 fn platform_key_candidates() -> Result<Vec<&'static str>, String> {
     let primary = primary_platform_key()?;
     let candidates = match primary {
-        // macOS x64 与 macOS amd64 指同一架构，兼容两个目录名可以避免旧仓库或不同平台习惯导致运行时找不到 FFmpeg。
-        // macOS x64 and macOS amd64 describe the same architecture, so supporting both directory names prevents runtime misses across repository revisions.
-        "macos_amd64" => vec!["macos_amd64", "macos_x64"],
+        // x64 是项目标准目录名，amd64 仅作为兼容别名保留，避免旧仓库或 Linux 发行版命名习惯导致找不到 FFmpeg。
+        // x64 is the project-standard directory name; amd64 remains a compatibility alias so older repositories or Linux distribution naming do not break FFmpeg lookup.
         "macos_x64" => vec!["macos_x64", "macos_amd64"],
+        "macos_amd64" => vec!["macos_x64", "macos_amd64"],
         "linux_x64" => vec!["linux_x64", "linux_amd64"],
-        "linux_amd64" => vec!["linux_amd64", "linux_x64"],
+        "linux_amd64" => vec!["linux_x64", "linux_amd64"],
         other => vec![other],
     };
     Ok(candidates)

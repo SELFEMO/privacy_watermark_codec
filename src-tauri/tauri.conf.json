@@ -10,10 +10,26 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [],
+    "windows": [
+      {
+        "label": "main",
+        "title": "图隐私水印编解码器",
+        "url": "index.html",
+        "width": 1440,
+        "height": 960,
+        "minWidth": 1120,
+        "minHeight": 760,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "visible": true,
+        "create": false
+      }
+    ],
     "security": {
       "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
-    }
+    },
+    "enableGTKAppId": true
   },
   "bundle": {
     "active": true,
@@ -27,6 +43,8 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/256x256.png",
+      "icons/512x512.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ],
@@ -52,13 +70,58 @@
       "vendor/ffmpeg/VERSION.txt",
       "vendor/ffmpeg/windows_x64/*",
       "vendor/ffmpeg/windows_arm64/*",
-      "vendor/ffmpeg/macos_amd64/*",
       "vendor/ffmpeg/macos_x64/*",
+      "vendor/ffmpeg/macos_amd64/*",
       "vendor/ffmpeg/macos_arm64/*",
       "vendor/ffmpeg/linux_x64/*",
       "vendor/ffmpeg/linux_amd64/*",
       "vendor/ffmpeg/linux_arm64/*"
-    ]
+    ],
+    "useLocalToolsDir": true,
+    "linux": {
+      "deb": {
+        "desktopTemplate": "linux/desktop-template.desktop",
+        "files": {
+          "/usr/share/applications/com.privacywatermark.codec.desktop": "linux/com.privacywatermark.codec.desktop",
+          "/usr/share/icons/hicolor/32x32/apps/com.privacywatermark.codec.png": "icons/32x32.png",
+          "/usr/share/icons/hicolor/128x128/apps/com.privacywatermark.codec.png": "icons/128x128.png",
+          "/usr/share/icons/hicolor/256x256/apps/com.privacywatermark.codec.png": "icons/256x256.png",
+          "/usr/share/icons/hicolor/scalable/apps/com.privacywatermark.codec.svg": "icons/icon.svg",
+          "/usr/share/pixmaps/com.privacywatermark.codec.png": "icons/512x512.png",
+          "/usr/share/metainfo/com.privacywatermark.codec.metainfo.xml": "linux/com.privacywatermark.codec.metainfo.xml",
+          "/usr/share/icons/hicolor/512x512/apps/com.privacywatermark.codec.png": "icons/512x512.png"
+        },
+        "postInstallScript": "linux/package-postinstall.sh",
+        "postRemoveScript": "linux/package-postremove.sh"
+      },
+      "rpm": {
+        "desktopTemplate": "linux/desktop-template.desktop",
+        "files": {
+          "/usr/share/applications/com.privacywatermark.codec.desktop": "linux/com.privacywatermark.codec.desktop",
+          "/usr/share/icons/hicolor/32x32/apps/com.privacywatermark.codec.png": "icons/32x32.png",
+          "/usr/share/icons/hicolor/128x128/apps/com.privacywatermark.codec.png": "icons/128x128.png",
+          "/usr/share/icons/hicolor/256x256/apps/com.privacywatermark.codec.png": "icons/256x256.png",
+          "/usr/share/icons/hicolor/scalable/apps/com.privacywatermark.codec.svg": "icons/icon.svg",
+          "/usr/share/pixmaps/com.privacywatermark.codec.png": "icons/512x512.png",
+          "/usr/share/metainfo/com.privacywatermark.codec.metainfo.xml": "linux/com.privacywatermark.codec.metainfo.xml",
+          "/usr/share/icons/hicolor/512x512/apps/com.privacywatermark.codec.png": "icons/512x512.png"
+        },
+        "postInstallScript": "linux/package-postinstall.sh",
+        "postRemoveScript": "linux/package-postremove.sh"
+      },
+      "appimage": {
+        "bundleMediaFramework": false,
+        "files": {
+          "/usr/share/icons/hicolor/32x32/apps/com.privacywatermark.codec.png": "icons/32x32.png",
+          "/usr/share/icons/hicolor/128x128/apps/com.privacywatermark.codec.png": "icons/128x128.png",
+          "/usr/share/icons/hicolor/256x256/apps/com.privacywatermark.codec.png": "icons/256x256.png",
+          "/usr/share/icons/hicolor/scalable/apps/com.privacywatermark.codec.svg": "icons/icon.svg",
+          "/usr/share/pixmaps/com.privacywatermark.codec.png": "icons/512x512.png",
+          "/usr/lib64/.pwc-keep": "linux/appimage-lib64-placeholder",
+          "/usr/share/icons/hicolor/512x512/apps/com.privacywatermark.codec.png": "icons/512x512.png"
+        }
+      }
+    }
   },
   "mainBinaryName": "privacy-watermark-codec"
 }

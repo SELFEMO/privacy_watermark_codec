@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.privacywatermark.codec</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>Privacy Watermark Codec</name>
+  <summary>Local invisible privacy watermark encoder and decoder</summary>
+  <description>
+    <p>Privacy Watermark Codec embeds encrypted invisible watermarks into images and videos, decodes watermark text with the matching key or password, and reports likely tampering using perceptual fingerprints.</p>
+  </description>
+  <launchable type="desktop-id">com.privacywatermark.codec.desktop</launchable>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <content_rating type="oars-1.1" />
+</component>

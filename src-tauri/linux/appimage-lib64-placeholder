@@ -1,0 +1,1 @@
+This placeholder keeps usr/lib64 present while linuxdeploy GTK hooks adjust AppDir permissions.

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=图隐私水印编解码器
+Name[en_US]=Privacy Watermark Codec
+Comment=Local invisible privacy watermark encoder and decoder
+Exec=/usr/bin/privacy-watermark-codec %U
+Icon=com.privacywatermark.codec
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=com.privacywatermark.codec
+X-GNOME-WMClass=com.privacywatermark.codec
+SingleMainWindow=true

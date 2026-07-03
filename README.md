@@ -2,24 +2,49 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Privacy Watermark Codec is a local desktop app built with Tauri, Vue, and Rust. It embeds encrypted invisible privacy watermarks into images and videos, extracts watermark text with a `.key` file or the original custom password, and reports likely media tampering.
+Privacy Watermark Codec is a local-first desktop app for invisible privacy watermarking. It embeds encrypted watermark text into images or videos, extracts the watermark with the matching key file or custom password, and reports likely tampering with perceptual fingerprints.
 
-The goal is not to add visible marks to images. The app embeds encrypted information into image frequency data while preserving visual quality, so it can be used for ownership claims, content tracing, and tamper inspection.
+The app is built with Tauri, Vue, and Rust. Media files, passwords, and key files stay on the local machine.
 
-## Features
+## What it does
 
-- Single-image, batch-image, and video watermark encoding.
-- Image and video watermark decoding.
-- Independent key, shared batch key, and custom-password key modes.
-- PBKDF2-HMAC-SHA256 key derivation and ChaCha20-Poly1305 encrypted payloads.
-- DCT mid-frequency embedding, BCH error correction, synchronization-template assisted registration, and repeated spatial voting.
-- Global and partitioned perceptual fingerprint reporting for likely tamper status and suspicious-region localization.
-- Unknown-image scan for project watermark headers and common privacy/AI metadata traces.
-- Local-only processing. Media, passwords, and key files are not uploaded.
-- Chinese and English UI.
-- Grouped Windows image right-click menu entries.
+- Encodes a single image, a batch of images, or a video.
+- Decodes watermarked images and videos.
+- Supports independent keys, one shared batch key, and custom-password mode.
+- Uses PBKDF2-HMAC-SHA256 for key derivation and ChaCha20-Poly1305 for encrypted payloads.
+- Uses DCT-domain embedding, BCH error correction, synchronization-assisted registration, and repeated voting to improve recovery robustness.
+- Reports global tamper status and suspicious regions from perceptual fingerprints.
+- Scans unknown images for this project watermark header and common privacy or AI metadata traces.
+- Provides Chinese and English UI text.
+- Adds grouped Windows image context-menu actions when installed through the Windows installer.
 
-## Clone or download
+## Repository layout
+
+```text
+privacy-watermark-codec/
+├─ src/                         Vue frontend
+├─ src/components/              UI components and brand mark
+├─ src-tauri/                   Tauri shell, commands, packaging config, video orchestration
+├─ src-tauri/icons/             App icons
+├─ src-tauri/linux/             Linux desktop entries, package hooks, and AppImage helpers
+├─ src-tauri/vendor/ffmpeg/     Bundled FFmpeg files and generated manifest
+├─ src-tauri/windows/           NSIS installer hooks
+├─ crates/watermark-core/       Rust watermark, crypto, key, scan, and tamper core
+├─ scripts/                     Development, release, FFmpeg, and AppImage helper scripts
+└─ .github/workflows/           Release workflow
+```
+
+## Prerequisites
+
+Install Node.js, Rust, and the Linux/macOS/Windows native dependencies required by Tauri on your platform.
+
+On Linux hosts, AppImage packaging also needs these commands:
+
+```text
+sudo apt install patchelf binutils file
+```
+
+## Clone and restore large FFmpeg files
 
 Recommended clone flow:
 
@@ -28,116 +53,73 @@ git clone https://github.com/SELFEMO/privacy_watermark_codec.git
 cd privacy_watermark_codec
 ```
 
-If you only need to inspect the source code, GitHub **Code > Download ZIP** can also be used. However, GitHub source ZIP archives may not include large Git LFS objects, so they should not be treated as complete build-ready packages.
-
-If FFmpeg binaries in the repository are managed by Git LFS, run these commands after cloning:
+If FFmpeg binaries are stored through Git LFS, restore them after cloning:
 
 ```text
 git lfs install
 git lfs pull
 ```
 
-These Git commands are the same on Windows, macOS, and Linux. Only the local project path differs, such as `D:\MyWorkstation\Learning\Rust\privacy_watermark_codec` on Windows or `~/Learning/Rust/privacy_watermark_codec` on macOS/Linux.
+If `git lfs` is unavailable on Ubuntu or Debian:
 
-## Prepare FFmpeg files
+```text
+sudo apt update
+sudo apt install -y git-lfs
+git lfs install
+git lfs pull
+```
 
-Video encoding and decoding require `ffmpeg` and `ffprobe`. The project reads bundled FFmpeg files from:
+A GitHub source ZIP may not include Git LFS binary objects. Use a full clone or a release source package when you need a build-ready tree.
+
+## FFmpeg assets
+
+Video features require `ffmpeg` and `ffprobe`. The project reads bundled files from:
 
 ```text
 src-tauri/vendor/ffmpeg/
 ```
 
-You can use the FFmpeg files already uploaded with the repository, or you can download or build FFmpeg yourself and place the files into the expected directory. The official FFmpeg website is `https://ffmpeg.org/`, and the official download page is `https://ffmpeg.org/download.html`. The official download page mainly provides source code and links to compiled package providers. Windows users can choose a compiled build from the providers listed on that page.
-
-Minimum required files:
+Minimum expected layout:
 
 ```text
 src-tauri/vendor/ffmpeg/windows_x64/ffmpeg.exe
 src-tauri/vendor/ffmpeg/windows_x64/ffprobe.exe
-
 src-tauri/vendor/ffmpeg/windows_arm64/ffmpeg.exe
 src-tauri/vendor/ffmpeg/windows_arm64/ffprobe.exe
 
+src-tauri/vendor/ffmpeg/macos_x64/ffmpeg
+src-tauri/vendor/ffmpeg/macos_x64/ffprobe
+src-tauri/vendor/ffmpeg/macos_amd64/ffmpeg
+src-tauri/vendor/ffmpeg/macos_amd64/ffprobe
 src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg
 src-tauri/vendor/ffmpeg/macos_arm64/ffprobe
 
-src-tauri/vendor/ffmpeg/macos_amd64/ffmpeg
-src-tauri/vendor/ffmpeg/macos_amd64/ffprobe
-
-# macos_x64 is a compatibility alias for macos_amd64 and can still be used when already present.
-src-tauri/vendor/ffmpeg/macos_x64/ffmpeg
-src-tauri/vendor/ffmpeg/macos_x64/ffprobe
-
 src-tauri/vendor/ffmpeg/linux_x64/ffmpeg
 src-tauri/vendor/ffmpeg/linux_x64/ffprobe
-
+src-tauri/vendor/ffmpeg/linux_amd64/ffmpeg
+src-tauri/vendor/ffmpeg/linux_amd64/ffprobe
 src-tauri/vendor/ffmpeg/linux_arm64/ffmpeg
 src-tauri/vendor/ffmpeg/linux_arm64/ffprobe
 ```
 
-`ffplay` is optional and is not required for watermark encoding or decoding.
+`ffplay` can be present but is not required for watermark encoding or decoding.
 
-After copying or replacing FFmpeg files, refresh the FFmpeg manifest from the project root:
+After adding or replacing FFmpeg files, refresh the manifest:
 
 ```text
 npm run ffmpeg:manifest
 ```
 
-On macOS and Linux, make runtime files executable before packaging. Replace the platform directory with the one you actually use:
+On macOS and Linux, ensure runtime files are executable:
 
 ```text
-chmod +x src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg src-tauri/vendor/ffmpeg/macos_arm64/ffprobe
-chmod +x src-tauri/vendor/ffmpeg/macos_amd64/ffmpeg src-tauri/vendor/ffmpeg/macos_amd64/ffprobe
 chmod +x src-tauri/vendor/ffmpeg/linux_x64/ffmpeg src-tauri/vendor/ffmpeg/linux_x64/ffprobe
+chmod +x src-tauri/vendor/ffmpeg/linux_arm64/ffmpeg src-tauri/vendor/ffmpeg/linux_arm64/ffprobe
+chmod +x src-tauri/vendor/ffmpeg/macos_x64/ffmpeg src-tauri/vendor/ffmpeg/macos_x64/ffprobe
+chmod +x src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg src-tauri/vendor/ffmpeg/macos_arm64/ffprobe
 ```
 
-## When Git LFS does not restore all FFmpeg files
-
-If you are sure the FFmpeg files exist in GitHub LFS but `git lfs pull` or `git lfs fetch --all` still leaves local files incomplete, handle it in this order.
-
-First, check whether local LFS include/exclude filters are active. Those filters can download only part of the paths:
-
-```text
-git config --show-origin --get-regexp "lfs\.(fetchinclude|fetchexclude)"
-```
-
-If the command prints `lfs.fetchinclude` or `lfs.fetchexclude`, remove repository and global filters:
-
-```text
-git config --local --unset-all lfs.fetchinclude
-git config --local --unset-all lfs.fetchexclude
-git config --global --unset-all lfs.fetchinclude
-git config --global --unset-all lfs.fetchexclude
-```
-
-If one line says the key does not exist, ignore it and continue.
-
-Second, fetch only the FFmpeg directory and explicitly check cached LFS objects out into the working tree:
-
-```text
-git lfs install --force
-git lfs fetch origin main --include="src-tauri/vendor/ffmpeg/**" --exclude=""
-git lfs checkout
-git lfs pull origin main --include="src-tauri/vendor/ffmpeg/**" --exclude=""
-```
-
-The important command is `git lfs checkout`. `git lfs fetch --all` downloads objects into the local LFS cache, but it does not always replace pointer text files in the working tree. `git lfs checkout` writes the real binaries from the local LFS cache back into the working tree.
-
-Third, check whether the working tree still contains pointer files. Real `ffmpeg.exe` or `ffmpeg` files are normally not tiny text files:
-
-```text
-git lfs ls-files
-```
-
-If FFmpeg entries are listed but local files are still small pointer files, run:
-
-```text
-git lfs checkout src-tauri/vendor/ffmpeg
-```
-
-If this still fails, the problem is usually not ordinary clone behavior. Common causes are: the current branch does not reference those LFS objects, the objects were not pushed to the same remote, repository LFS permission/quota problems, or local proxy/network blocking. The repository maintainer should push LFS objects again using `GITHUB_UPLOAD_COMMANDS.md`.
-
-## Install, start, and package
+## Development
 
 Install frontend dependencies:
 
@@ -145,186 +127,155 @@ Install frontend dependencies:
 npm install
 ```
 
-Start development mode:
+Start the desktop app in development mode:
 
 ```text
 npm run tauri:dev
 ```
 
-Build the package for the current platform:
+Linux development mode temporarily writes user-level desktop entries and hicolor icons before the Tauri window starts. This helps GNOME/Ubuntu Dock match the debug window to the real app icon. The wrapper removes those temporary files on normal exit.
+
+If the terminal is killed or stale development icons remain, run either cleanup command from the project root:
+
+```text
+npm run tauri:dev:cleanup
+npm run linux:desktop:cleanup
+```
+
+Both cleanup commands call the same script. They only remove project-managed temporary development entries and refresh desktop/icon caches; they do not uninstall `.deb` or `.rpm` packages.
+
+## Packaging commands
+
+Build the default bundle for the current platform:
 
 ```text
 npm run tauri:build
 ```
 
-Build a specific platform target:
+### Windows
 
 ```text
-npm run tauri:build:windows:nsis
-npm run tauri:build:windows:x64
-npm run tauri:build:windows:amd64
-npm run tauri:build:windows:arm64
+npm run tauri:build:windows
+npm run tauri:build:windows:nsis:x64
+npm run tauri:build:windows:nsis:arm64
+npm run tauri:build:windows:msi:x64
+npm run tauri:build:windows:msi:arm64
+npm run tauri:build:windows:all:x64
+npm run tauri:build:windows:all:arm64
+```
+
+The short `windows` command builds the NSIS installer for the current Windows host architecture. The `all` commands build both NSIS and MSI.
+
+### macOS
+
+```text
 npm run tauri:build:macos
 npm run tauri:build:macos:x64
-npm run tauri:build:macos:amd64
 npm run tauri:build:macos:arm64
-npm run tauri:build:linux
-npm run tauri:build:linux:x64
-npm run tauri:build:linux:amd64
+npm run tauri:build:macos:dmg
+npm run tauri:build:macos:x64:dmg
+npm run tauri:build:macos:arm64:dmg
 ```
 
-For Windows ARM64 packages, install the Rust target first:
+`macos` builds a runnable app bundle. The `dmg` commands also try to create a disk image.
+
+### Linux stable installers
+
+For Ubuntu, Debian, Fedora, openSUSE, and other package-manager flows, prefer DEB/RPM installers:
 
 ```text
-rustup target add aarch64-pc-windows-msvc
-npm run tauri:build:windows:arm64
+npm run tauri:build:linux:installers:x64
+npm run tauri:build:linux:deb:x64
+npm run tauri:build:linux:rpm:x64
 ```
 
-
-Architecture aliases are supported consistently. `x64`, `amd64`, and `x86_64` refer to the same Intel/AMD 64-bit target naming family. The `x64` scripts are kept as user-facing aliases, while some internal directory names still use `amd64` for compatibility with earlier releases.
-
-### Packaging resource policy
-
-The repository still keeps FFmpeg resources for all supported platforms so Windows, macOS, and Linux packages can be built on matching machines or in CI. During release packaging, `scripts/build-release.mjs` temporarily narrows `bundle.resources` according to the target platform, so the installer only includes the FFmpeg directory required by that target. After the build finishes, `src-tauri/tauri.conf.json` is restored automatically, so packaging should not leave configuration changes in `git status`.
-
-For example:
+ARM64 aliases are also available:
 
 ```text
-npm run tauri:build:windows:nsis
+npm run tauri:build:linux:installers:arm64
+npm run tauri:build:linux:deb:arm64
+npm run tauri:build:linux:rpm:arm64
 ```
 
-The installer includes only the common manifest/license files and:
+Install a generated DEB from the project root:
 
 ```text
-src-tauri/vendor/ffmpeg/windows_x64/
+sudo apt install ./release/privacy-watermark-codec-linux-x64.deb
 ```
 
-It no longer bundles unrelated FFmpeg directories such as `macos_arm64`, `macos_amd64`, `macos_x64`, or `linux_x64`.
+If your shell is already inside `release/`, use:
 
 ```text
-npm run tauri:build:macos:arm64
+sudo apt install ./privacy-watermark-codec-linux-x64.deb
 ```
 
-includes only:
+### Linux AppImage, optional
+
+AppImage is kept as an optional single-file Linux distribution format. It is useful when users want to download one executable file and run it without installing a package, but it has higher maintenance cost because it depends on linuxdeploy, AppImage helper downloads, WebKitGTK/GStreamer dependency collection, and local ELF patching tools.
+
+Normal AppImage flow:
 
 ```text
-src-tauri/vendor/ffmpeg/macos_arm64/
+npm run tauri:build:linux:appimage:diagnose
+npm run tauri:build:linux:appimage:prefetch
+npm run tauri:build:linux:appimage:x64
 ```
 
-Running raw `tauri build` directly may bypass this dynamic resource narrowing. For release builds, use the `npm run tauri:build...` scripts defined in `package.json`.
-
-### Build an Intel Mac package on an Apple Silicon Mac
-
-If the current machine is an M-series Mac but you need a package for Intel Mac users, you must prepare both the Rust Intel target and Intel-architecture FFmpeg files. `aarch64` / `arm64` means Apple Silicon, while `x86_64` / `amd64` means Intel Mac. Do not copy FFmpeg from `macos_arm64` into `macos_amd64`; otherwise the package target may look like Intel, but the bundled runtime architecture will be wrong.
-
-First, install the Rust Intel Mac target:
+Run the generated AppImage:
 
 ```text
-rustup target add x86_64-apple-darwin
+chmod u+x ./release/privacy-watermark-codec-linux-x64.AppImage
+./release/privacy-watermark-codec-linux-x64.AppImage
 ```
 
-Second, prepare Intel FFmpeg and place it in the `macos_amd64` directory:
+Verbose AppImage retry for diagnosis only:
 
 ```text
-mkdir -p src-tauri/vendor/ffmpeg/macos_amd64
-# Copy x86_64 ffmpeg, ffprobe, and ffplay into this directory.
+PWC_APPIMAGE_VERBOSE=1 npm run tauri:build:linux:appimage:x64
 ```
 
-After copying, verify that the binaries are really `x86_64`:
+If GitHub release-asset downloads are slow or blocked, the build script first caches required helper binaries under `target/.tauri/pwc-appimage-tools`, caches raw linuxdeploy helper scripts under `target/.tauri`, and serves release helpers to Tauri through a temporary local mirror. You can also provide a mirror template:
 
 ```text
-file src-tauri/vendor/ffmpeg/macos_amd64/ffmpeg
-file src-tauri/vendor/ffmpeg/macos_amd64/ffprobe
-file src-tauri/vendor/ffmpeg/macos_amd64/ffplay
+PWC_APPIMAGE_TOOLS_MIRROR_TEMPLATE=https://mirror.example.com/<owner>/<repo>/releases/download/<version>/<asset> npm run tauri:build:linux:appimage:prefetch
+TAURI_BUNDLER_TOOLS_GITHUB_MIRROR_TEMPLATE=https://mirror.example.com/<owner>/<repo>/releases/download/<version>/<asset> npm run tauri:build:linux:appimage:x64
 ```
 
-The expected output should contain:
+During AppImage packaging, Linux FFmpeg binaries are temporarily encoded as `.pwcbin` non-ELF resources so linuxdeploy does not run `patchelf` on the large prebuilt FFmpeg executables. The build script restores the source tree after packaging. At runtime, the Rust backend restores `.pwcbin` resources into the user data cache and verifies them against the manifest hashes before use. AppImage builds set `LDAI_NO_APPSTREAM=1` because appimagetool can treat optional AppStream warnings as fatal; DEB/RPM packages still install the system metainfo file.
+
+### Linux all-in-one command
 
 ```text
-Mach-O 64-bit executable x86_64
+npm run tauri:build:linux:x64:all
 ```
 
-If the output says `arm64`, or if it is a universal binary that does not include `x86_64`, it is not suitable for the Intel Mac target package.
+This builds DEB and RPM first, then attempts AppImage. If AppImage fails after DEB/RPM are already produced, the script keeps the successful installer packages in `release/` and reports AppImage as optional.
 
-Third, set executable permissions and refresh the FFmpeg manifest:
+## Release output
+
+The release script copies distributable artifacts to:
 
 ```text
-chmod 755 src-tauri/vendor/ffmpeg/macos_amd64/ffmpeg
-chmod 755 src-tauri/vendor/ffmpeg/macos_amd64/ffprobe
-chmod 755 src-tauri/vendor/ffmpeg/macos_amd64/ffplay
-npm run ffmpeg:manifest
+release/
 ```
 
-Fourth, build the Intel Mac package from the Apple Silicon Mac:
+Canonical names:
 
 ```text
-npm run tauri:build:macos:amd64
+privacy-watermark-codec-windows-x64.exe
+privacy-watermark-codec-windows-x64.msi
+privacy-watermark-codec-macos-x64.app
+privacy-watermark-codec-macos-x64.dmg
+privacy-watermark-codec-linux-x64.deb
+privacy-watermark-codec-linux-x64.rpm
+privacy-watermark-codec-linux-x64.AppImage
 ```
 
-If a DMG is also required, run:
-
-```text
-npm run tauri:build:macos:amd64:dmg
-```
-
-Common output directories:
-
-```text
-target/x86_64-apple-darwin/release/bundle/macos/
-target/x86_64-apple-darwin/release/bundle/dmg/
-```
-
-Common output directories:
-
-```text
-target/release/bundle/nsis/
-target/release/bundle/dmg/
-target/release/bundle/macos/
-target/x86_64-apple-darwin/release/bundle/dmg/
-```
-
-## Usage
-
-### Encode watermark
-
-1. Open the app and enter encode mode.
-2. Select image or video files.
-3. Select the output directory.
-4. Enter the watermark text.
-5. Choose independent key, shared batch key, or custom password.
-6. Start encoding.
-7. Keep the output media, `.key` file, and evidence manifest.
-
-### Decode watermark
-
-1. Open the app and enter decode mode.
-2. Select encoded images or videos.
-3. Select the `.key` file or enter the original custom password.
-4. Start decoding and inspection.
-5. Review extracted watermark text, tamper status, and suspicious regions.
-
-### Scan unknown images
-
-1. Select one or more unknown images, or import them from the Windows right-click menu.
-2. Start scan.
-3. Review whether project watermark headers, privacy metadata, or AI watermark traces are found.
-
-A positive project-header scan means an encrypted project watermark may be present. It does not reveal watermark text without the key/password. A negative scan result is not proof that the image is watermark-free.
-
-## Current validation status
-
-| Platform | Current status | Notes |
-| --- | --- | --- |
-| Windows x64 | Verified | Encoding, decoding, packaging, and NSIS installer flow have passed. |
-| Windows ARM64 | Supported, pending device review | Directory and build-script support are present. Review with matching FFmpeg files on a target device. |
-| macOS ARM64 | Verified | Apple Silicon build flow, FFmpeg manifest generation, and local runtime flow have passed. |
-| macOS AMD64 / x64 | Verified | Both `macos_amd64` and `macos_x64` directory names are supported for Intel Mac target packages. |
-| Linux x64 | Supported, pending release-environment review | Directory and build-script support are present. Review system dependencies and packaging on a Linux release environment. |
-| Linux ARM64 | Supported, pending device review | Directory and build-script support are present. Review with matching FFmpeg files on a target device. |
+Tauri's original bundle output remains under `target/**/release/bundle/`.
 
 ## Runtime storage policy
 
-The app does not use `%APPDATA%` as its own runtime data directory. Runtime data is stored beside the executable:
+Portable builds and development mode use a writable directory beside the executable when possible:
 
 ```text
 PrivacyWatermarkCodecData/
@@ -332,51 +283,86 @@ PrivacyWatermarkCodecData/
 └─ work/
 ```
 
-The Windows installer tries to choose a non-system drive when possible. Uninstall removes `PrivacyWatermarkCodecData` from the install directory.
-
-## Windows right-click menu
-
-The Windows installer registers a grouped image context menu:
+Linux DEB/RPM packages are normally installed under system locations that ordinary users cannot write to. In that case the app falls back to user data storage, for example:
 
 ```text
-Privacy Watermark Codec
-├─ 编码隐私水印 / Encode privacy watermark
-├─ 检查隐私水印 / Decode and inspect
-└─ 无密钥扫描 / Keyless scan
+~/.local/share/privacy-watermark-codec/PrivacyWatermarkCodecData/
+├─ webview-data/
+└─ work/
 ```
 
-The submenu uses the app icon and supports multi-select. Selected files are merged into the app through the single-instance handler.
+This fallback prevents installed Linux packages from exiting before the WebView window is created.
 
-## Key file warning
+## App usage
 
-`.key` files contain derived decryption material. Treat them like password files. If a key file is exposed, the corresponding watermark text may be recovered.
+### Encode
 
-## Project structure
+1. Open encode mode.
+2. Select image or video files.
+3. Choose an output directory.
+4. Enter watermark text.
+5. Choose independent key, shared batch key, or custom password.
+6. Start encoding.
+7. Keep the output media, generated `.key` file, and evidence manifest.
+
+### Decode
+
+1. Open decode mode.
+2. Select encoded images or videos.
+3. Select the `.key` file or enter the original custom password.
+4. Start decoding and inspection.
+5. Review extracted text, tamper status, and suspicious regions.
+
+### Scan
+
+1. Select unknown images, or import them from the Windows right-click menu.
+2. Start scan.
+3. Review whether a project watermark header, privacy metadata, or AI watermark traces are found.
+
+A positive project-header scan means an encrypted project watermark may be present. It does not reveal watermark text without the key or password. A negative scan result is not proof that the image is watermark-free.
+
+## Current validation status
+
+| Platform                   | Current status                                 | Notes                                                                                                                                                                       |
+| -------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows x64                | Verified                                       | Encoding, decoding, packaging, and NSIS installer flow have passed in earlier validation.                                                                                   |
+| Windows ARM64              | Supported, pending device review               | Scripts and FFmpeg directory names are present; test on real hardware before release.                                                                                       |
+| macOS ARM64                | Verified                                       | Apple Silicon build flow and local runtime were validated earlier.                                                                                                          |
+| macOS x64                  | Supported                                      | `macos_x64` is the preferred Intel Mac folder; `macos_amd64` remains as a compatibility alias.                                                                          |
+| Linux x64 / amd64 DEB      | Verified                                       | Package installs and launches; runtime data falls back to the user data directory when system install paths are not writable.                                               |
+| Linux x64 / amd64 RPM      | Verified through local conversion/install flow | Package launches after install; distribution-native RPM testing is still recommended.                                                                                       |
+| Linux x64 / amd64 AppImage | Optional                                       | Previous failures reached appimagetool and failed on optional AppStream validation. The AppImage build now sets`LDAI_NO_APPSTREAM=1`; DEB/RPM still keep system metadata. |
+| Linux ARM64                | Supported, pending device review               | Scripts and FFmpeg directory names are present; test with ARM64 FFmpeg binaries on target hardware.                                                                         |
+
+## Security notes
+
+- `.key` files contain derived decryption material. Treat them like password files.
+- Custom-password mode depends on the strength and secrecy of the password.
+- FFmpeg binaries are checked against the generated manifest before video processing, so replacing bundled FFmpeg files requires regenerating the manifest before release.
+
+## Troubleshooting
+
+### AppImage reports missing tools
 
 ```text
-privacy-watermark-codec/
-├─ src/                         Vue frontend
-├─ src/components/              UI components and brand mark
-├─ src-tauri/                   Tauri shell, commands, installer config, video orchestration
-├─ src-tauri/icons/             App icons
-├─ src-tauri/vendor/ffmpeg/     Bundled FFmpeg binaries and manifest
-├─ src-tauri/windows/           NSIS installer hooks
-├─ crates/watermark-core/       Rust watermark, crypto, key, scan, and tamper core
-├─ scripts/                     Build, release, and manifest scripts
-└─ .github/workflows/           Windows release workflow
+npm run tauri:build:linux:appimage:diagnose
+sudo apt install patchelf binutils file
 ```
 
-## AI development notice
+### AppImage fails during AppStream validation
 
-This project was implemented with AI-assisted programming. Before public release or production use, review the code, verify watermark behavior with your own sample set, and confirm all third-party binary licenses.
+If `pwc-appimage-build.log` contains `Failed to validate AppStream information with appstreamcli`, rebuild with this updated tree. The AppImage build now sets `LDAI_NO_APPSTREAM=1`, the environment variable supported by `linuxdeploy-plugin-appimage`, because AppImage metadata warnings can stop `appimagetool`; DEB/RPM packages still include system metainfo.
 
+### AppImage output is too long
 
-### FFmpeg automatic preparation
+Do not use `PWC_APPIMAGE_VERBOSE=1` for normal builds. Use it only when AppImage fails and you need a detailed `target/**/release/pwc-appimage-build.log`.
 
-When `npm run ffmpeg:manifest` or `npm run tauri:build` runs, the script first checks `src-tauri/vendor/ffmpeg/<current-platform>/`. If the current platform is missing `ffmpeg` and `ffprobe` but FFmpeg is already available in `PATH`, the script copies the current-platform `ffmpeg`, `ffprobe`, and optional `ffplay` into the matching vendor directory and regenerates the manifest. Cross-building for another architecture still requires FFmpeg binaries for that target architecture.
+### Linux Dock still shows an old icon
 
-### macOS build notes
+Unpin the old icon, run the cleanup command for development entries, and restart the app:
 
-On macOS, `npm run tauri:build` now builds the current-architecture `.app` first, because `.app` is the runnable artifact and DMG creation can fail due to local `hdiutil`, mount, or permission state. Use `npm run tauri:build:macos:dmg` only when you specifically need a `.dmg`.
+```text
+npm run linux:desktop:cleanup
+```
 
-Apple Silicon builds require `src-tauri/vendor/ffmpeg/macos_arm64`. Intel Mac builds require `src-tauri/vendor/ffmpeg/macos_amd64` or `src-tauri/vendor/ffmpeg/macos_x64`; ARM64 FFmpeg cannot be reused for the Intel package.
+If a system package was installed, refresh desktop caches or log out and back in.

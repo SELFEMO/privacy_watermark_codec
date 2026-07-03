@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import BrandMark from "./components/BrandMark.vue";
 import type {
@@ -33,6 +35,10 @@ const messages = {
     eyebrow: "PRIVACY WATERMARK CODEC",
     subtitle: "不可见频域水印 · 加密载荷 · 感知篡改检测 · 本地离线处理",
     localOnly: "本地离线处理",
+    uiZoomLabel: "界面缩放",
+    uiZoomOut: "缩小界面",
+    uiZoomIn: "放大界面",
+    uiZoomReset: "重置",
     tabEncode: "编码水印",
     tabDecode: "解码检测",
     tabScan: "未知图片扫描",
@@ -194,6 +200,10 @@ const messages = {
     eyebrow: "PRIVACY WATERMARK CODEC",
     subtitle: "Invisible frequency-domain watermark · encrypted payload · perceptual tamper detection · local processing",
     localOnly: "Local only",
+    uiZoomLabel: "UI zoom",
+    uiZoomOut: "Zoom out",
+    uiZoomIn: "Zoom in",
+    uiZoomReset: "Reset",
     tabEncode: "Encode",
     tabDecode: "Decode",
     tabScan: "Unknown image scan",
@@ -352,8 +362,18 @@ const messages = {
   },
 } as const;
 
+const UI_ZOOM_STORAGE_KEY = "pwc-ui-zoom";
+const LEGACY_DEFAULT_UI_ZOOM = 1.12;
+// 默认界面缩放保持 100%，避免清晰度增强和应用内缩放叠加后把三栏内容挤出卡片。
+// The default UI zoom stays at 100% so readability improvements do not multiply with app zoom and push three-column content outside cards.
+const DEFAULT_UI_ZOOM = 1;
+const MIN_UI_ZOOM = 1;
+const MAX_UI_ZOOM = 1.35;
+const UI_ZOOM_STEP = 0.05;
+
 const activeTab = ref<TabId>("encode");
 const language = ref<Language>(detectLanguage());
+const uiZoom = ref(readStoredUiZoom());
 const encodeInputs = ref<string[]>([]);
 const decodeInputs = ref<string[]>([]);
 const scanInputs = ref<string[]>([]);
@@ -383,6 +403,7 @@ const activeTaskId = ref("");
 let launchTimer: number | undefined;
 let unlistenLaunchContext: (() => void) | undefined;
 let unlistenTaskProgress: (() => void) | undefined;
+let unlistenScaleChanged: (() => void) | undefined;
 
 const canEncode = computed(
   () =>
@@ -439,6 +460,56 @@ function detectLanguage(): Language {
 function setLanguage(nextLanguage: Language) {
   language.value = nextLanguage;
   window.localStorage.setItem("pwc-language", nextLanguage);
+}
+
+function normalizeUiZoom(value: number): number {
+  return Math.round(Math.max(MIN_UI_ZOOM, Math.min(value, MAX_UI_ZOOM)) * 100) / 100;
+}
+
+function readStoredUiZoom(): number {
+  const rawValue = window.localStorage.getItem(UI_ZOOM_STORAGE_KEY);
+  const saved = Number(rawValue);
+  if (Number.isFinite(saved) && Math.abs(saved - LEGACY_DEFAULT_UI_ZOOM) < 0.001) {
+    // 早期清晰度增强包曾把 112% 当作默认值；升级时把这个历史默认迁移回 100%，避免旧默认继续造成内容裁切。
+    // An earlier readability build used 112% as the default; migrating that historical default back to 100% prevents old settings from continuing to clip content.
+    window.localStorage.setItem(UI_ZOOM_STORAGE_KEY, String(DEFAULT_UI_ZOOM));
+    return DEFAULT_UI_ZOOM;
+  }
+  return Number.isFinite(saved) && saved > 0 ? normalizeUiZoom(saved) : DEFAULT_UI_ZOOM;
+}
+
+async function applyUiZoom(): Promise<void> {
+  const zoom = normalizeUiZoom(uiZoom.value);
+  uiZoom.value = zoom;
+
+  // Linux 高 DPI 或分数缩放环境下，单纯把文字写大仍可能被 WebView/XWayland 二次缩放；直接设置 WebView 缩放可以让页面先以更大的逻辑尺寸排版，降低文字被放大后发虚的感知。
+  // On Linux HiDPI or fractional-scaling setups, increasing font sizes alone can still be resampled by WebView/XWayland; setting WebView zoom lets the page lay out at a larger logical size first, reducing perceived text blur after scaling.
+  try {
+    await getCurrentWebview().setZoom(zoom);
+  } catch {
+    // 如果运行环境暂时拒绝 WebView 缩放，前端字号和对比度增强仍然生效，避免缩放失败反过来阻断应用启动。
+    // If the runtime rejects WebView zoom, the stronger font sizes and contrast still apply, preventing a zoom failure from blocking app startup.
+    document.documentElement.dataset.webviewZoom = "unavailable";
+  }
+}
+
+function setUiZoom(nextZoom: number) {
+  const zoom = normalizeUiZoom(nextZoom);
+  uiZoom.value = zoom;
+  window.localStorage.setItem(UI_ZOOM_STORAGE_KEY, String(zoom));
+  void applyUiZoom();
+}
+
+function resetUiZoom() {
+  setUiZoom(DEFAULT_UI_ZOOM);
+}
+
+async function syncDisplayScaleInfo(): Promise<void> {
+  const scaleFactor = await getCurrentWindow().scaleFactor();
+
+  // 这里只把系统缩放因子记录到 DOM 属性中供 CSS/调试判断使用，不再参与布局计算，避免系统 DPI 与应用内部缩放互相叠加。
+  // The system scale factor is only exposed as a DOM attribute for CSS/debugging and is not mixed into layout math, preventing system DPI and app zoom from multiplying each other.
+  document.documentElement.dataset.scaleFactor = scaleFactor.toFixed(2);
 }
 
 function selectTab(tab: TabId) {
@@ -962,6 +1033,14 @@ async function applyInitialLaunchContext() {
 
 onMounted(() => {
   updateViewportScale();
+  void applyUiZoom();
+  void syncDisplayScaleInfo();
+  void getCurrentWindow().onScaleChanged(({ payload }) => {
+    document.documentElement.dataset.scaleFactor = payload.scaleFactor.toFixed(2);
+    void applyUiZoom();
+  }).then((unlisten) => {
+    unlistenScaleChanged = unlisten;
+  });
   void applyInitialLaunchContext();
   void loadReleaseInfo();
   void listen<LaunchContext>("pwc-launch-context", (event) => {
@@ -986,6 +1065,7 @@ onBeforeUnmount(() => {
   if (launchTimer !== undefined) window.clearTimeout(launchTimer);
   unlistenLaunchContext?.();
   unlistenTaskProgress?.();
+  unlistenScaleChanged?.();
   window.removeEventListener("resize", updateViewportScale);
   window.visualViewport?.removeEventListener("resize", updateViewportScale);
 });
@@ -1010,6 +1090,12 @@ onBeforeUnmount(() => {
         <div class="language-switch" aria-label="Language switch">
           <button :class="{ active: language === 'zh' }" @click="setLanguage('zh')">中</button>
           <button :class="{ active: language === 'en' }" @click="setLanguage('en')">EN</button>
+        </div>
+        <div class="zoom-control" :aria-label="t('uiZoomLabel')">
+          <span>{{ t("uiZoomLabel") }} {{ Math.round(uiZoom * 100) }}%</span>
+          <button type="button" :aria-label="t('uiZoomOut')" :disabled="uiZoom <= MIN_UI_ZOOM" @click="setUiZoom(uiZoom - UI_ZOOM_STEP)">−</button>
+          <button type="button" @click="resetUiZoom">{{ t("uiZoomReset") }}</button>
+          <button type="button" :aria-label="t('uiZoomIn')" :disabled="uiZoom >= MAX_UI_ZOOM" @click="setUiZoom(uiZoom + UI_ZOOM_STEP)">+</button>
         </div>
       </div>
     </header>
