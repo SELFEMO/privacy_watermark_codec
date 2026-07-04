@@ -4,7 +4,11 @@
 
 Privacy Watermark Codec is a local-first desktop app for invisible privacy watermarking. It embeds encrypted watermark text into images or videos, extracts the watermark with the matching key file or custom password, and reports likely tampering with perceptual fingerprints.
 
-The app is built with Tauri, Vue, and Rust. Media files, passwords, and key files stay on the local machine.
+> The app is built with Tauri, Vue, and Rust. Media files, passwords, and key files stay on the local machine.
+
+## AI development notice
+
+This project was implemented with AI-assisted programming. Before public release or production use, review the code, test the target platforms, verify the watermark behavior with your own sample set, and confirm all third-party binary licenses.
 
 ## What it does
 
