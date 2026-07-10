@@ -44,7 +44,7 @@ Install Node.js, Rust, and the Linux/macOS/Windows native dependencies required 
 
 On Linux hosts, AppImage packaging also needs these commands:
 
-```text
+```Shell
 sudo apt install patchelf binutils file
 ```
 
@@ -52,21 +52,21 @@ sudo apt install patchelf binutils file
 
 Recommended clone flow:
 
-```text
+```Shell
 git clone https://github.com/SELFEMO/privacy_watermark_codec.git
 cd privacy_watermark_codec
 ```
 
 If FFmpeg binaries are stored through Git LFS, restore them after cloning:
 
-```text
+```Shell
 git lfs install
 git lfs pull
 ```
 
 If `git lfs` is unavailable on Ubuntu or Debian:
 
-```text
+```Shell
 sudo apt update
 sudo apt install -y git-lfs
 git lfs install
@@ -106,17 +106,17 @@ src-tauri/vendor/ffmpeg/linux_arm64/ffmpeg
 src-tauri/vendor/ffmpeg/linux_arm64/ffprobe
 ```
 
-`ffplay` can be present but is not required for watermark encoding or decoding.
+> `ffplay` can be present but is not required for watermark encoding or decoding.
 
 After adding or replacing FFmpeg files, refresh the manifest:
 
-```text
+```Shell
 npm run ffmpeg:manifest
 ```
 
 On macOS and Linux, ensure runtime files are executable:
 
-```text
+```Shell
 chmod +x src-tauri/vendor/ffmpeg/linux_x64/ffmpeg src-tauri/vendor/ffmpeg/linux_x64/ffprobe
 chmod +x src-tauri/vendor/ffmpeg/linux_arm64/ffmpeg src-tauri/vendor/ffmpeg/linux_arm64/ffprobe
 chmod +x src-tauri/vendor/ffmpeg/macos_x64/ffmpeg src-tauri/vendor/ffmpeg/macos_x64/ffprobe
@@ -127,13 +127,13 @@ chmod +x src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg src-tauri/vendor/ffmpeg/maco
 
 Install frontend dependencies:
 
-```text
+```Shell
 npm install
 ```
 
 Start the desktop app in development mode:
 
-```text
+```Shell
 npm run tauri:dev
 ```
 
@@ -141,7 +141,7 @@ Linux development mode temporarily writes user-level desktop entries and hicolor
 
 If the terminal is killed or stale development icons remain, run either cleanup command from the project root:
 
-```text
+```Shell
 npm run tauri:dev:cleanup
 npm run linux:desktop:cleanup
 ```
@@ -152,13 +152,13 @@ Both cleanup commands call the same script. They only remove project-managed tem
 
 Build the default bundle for the current platform:
 
-```text
+```Shell
 npm run tauri:build
 ```
 
 ### Windows
 
-```text
+```Shell
 npm run tauri:build:windows
 npm run tauri:build:windows:nsis:x64
 npm run tauri:build:windows:nsis:arm64
@@ -172,7 +172,7 @@ The short `windows` command builds the NSIS installer for the current Windows ho
 
 ### macOS
 
-```text
+```Shell
 npm run tauri:build:macos
 npm run tauri:build:macos:x64
 npm run tauri:build:macos:arm64
@@ -187,7 +187,7 @@ npm run tauri:build:macos:arm64:dmg
 
 For Ubuntu, Debian, Fedora, openSUSE, and other package-manager flows, prefer DEB/RPM installers:
 
-```text
+```Shell
 npm run tauri:build:linux:installers:x64
 npm run tauri:build:linux:deb:x64
 npm run tauri:build:linux:rpm:x64
@@ -195,7 +195,7 @@ npm run tauri:build:linux:rpm:x64
 
 ARM64 aliases are also available:
 
-```text
+```Shell
 npm run tauri:build:linux:installers:arm64
 npm run tauri:build:linux:deb:arm64
 npm run tauri:build:linux:rpm:arm64
@@ -203,13 +203,13 @@ npm run tauri:build:linux:rpm:arm64
 
 Install a generated DEB from the project root:
 
-```text
+```Shell
 sudo apt install ./release/privacy-watermark-codec-linux-x64.deb
 ```
 
 If your shell is already inside `release/`, use:
 
-```text
+```Shell
 sudo apt install ./privacy-watermark-codec-linux-x64.deb
 ```
 
@@ -219,7 +219,7 @@ AppImage is kept as an optional single-file Linux distribution format. It is use
 
 Normal AppImage flow:
 
-```text
+```Shell
 npm run tauri:build:linux:appimage:diagnose
 npm run tauri:build:linux:appimage:prefetch
 npm run tauri:build:linux:appimage:x64
@@ -227,14 +227,14 @@ npm run tauri:build:linux:appimage:x64
 
 Run the generated AppImage:
 
-```text
+```Shell
 chmod u+x ./release/privacy-watermark-codec-linux-x64.AppImage
 ./release/privacy-watermark-codec-linux-x64.AppImage
 ```
 
 Verbose AppImage retry for diagnosis only:
 
-```text
+```Shell
 PWC_APPIMAGE_VERBOSE=1 npm run tauri:build:linux:appimage:x64
 ```
 
@@ -249,7 +249,7 @@ During AppImage packaging, Linux FFmpeg binaries are temporarily encoded as `.pw
 
 ### Linux all-in-one command
 
-```text
+```Shell
 npm run tauri:build:linux:x64:all
 ```
 
@@ -348,7 +348,7 @@ A positive project-header scan means an encrypted project watermark may be prese
 
 ### AppImage reports missing tools
 
-```text
+```Shell
 npm run tauri:build:linux:appimage:diagnose
 sudo apt install patchelf binutils file
 ```
@@ -365,7 +365,7 @@ Do not use `PWC_APPIMAGE_VERBOSE=1` for normal builds. Use it only when AppImage
 
 Unpin the old icon, run the cleanup command for development entries, and restart the app:
 
-```text
+```Shell
 npm run linux:desktop:cleanup
 ```
 
