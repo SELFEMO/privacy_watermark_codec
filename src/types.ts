@@ -20,6 +20,8 @@ export interface EncodeItemResult {
   mediaType: "image" | "video";
   psnr?: number;
   frameCount?: number;
+  succeeded?: boolean;
+  error?: string;
 }
 
 export interface EncodeResponse {
@@ -32,6 +34,7 @@ export interface EncodeResponse {
 export interface DecodeRequest {
   inputPaths: string[];
   keyFile?: string;
+  keyFiles?: string[];
   customPassword?: string;
   frameParallelism?: number;
   taskId?: string;
@@ -50,25 +53,63 @@ export interface TamperRegion {
 export interface SyncRegistration {
   rotationDegrees: number;
   scale: number;
+  translationX: number;
+  translationY: number;
   score: number;
+}
+
+
+export type TimelineAnomalyKind =
+  | "insertion"
+  | "deletion"
+  | "replacement"
+  | "duplicate"
+  | "out_of_order";
+
+export interface TimelineAnomalyRange {
+  kind: TimelineAnomalyKind;
+  physicalStartFrame?: number;
+  physicalEndFrame?: number;
+  expectedStartFrame?: number;
+  expectedEndFrame?: number;
+  count: number;
 }
 
 export interface DecodeItemResult {
   inputPath: string;
+  succeeded: boolean;
+  error?: string;
   mediaType: "image" | "video";
   text: string;
   integrity: "intact" | "uncertain" | "modified";
   fingerprintDistance?: number;
   correctedCodewords: number;
   frameCount?: number;
+  expectedFrameCount?: number;
   validFrames?: number;
   modifiedFrames?: number;
+  missingFrames?: number;
+  insertedFrames?: number;
+  deletedFrames?: number;
+  duplicateFrames?: number;
+  outOfOrderFrames?: number;
+  replacedFrames?: number;
+  unreadableFrames?: number;
+  transformedFrames?: number;
+  timelineAnomalies: TimelineAnomalyRange[];
   tamperRegions: TamperRegion[];
   syncRegistration?: SyncRegistration;
 }
 
 export interface DecodeResponse {
   items: DecodeItemResult[];
+}
+
+export interface DecodeItemEvent {
+  taskId?: string;
+  current: number;
+  total: number;
+  item: DecodeItemResult;
 }
 
 export interface ScanRequest {
@@ -91,6 +132,7 @@ export interface ScanItemResult {
   detections: ScanDetection[];
   width?: number;
   height?: number;
+  error?: string;
 }
 
 export interface ScanResponse {
@@ -102,16 +144,27 @@ export interface CancelTaskRequest {
 }
 
 export type TaskProgressKind = "encode" | "decode" | "scan";
+export type TaskOutcome = "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
+export type ProgressUnitKind = "file" | "frame" | "geometry";
 
 export interface TaskProgressEvent {
   taskId?: string;
   task: TaskProgressKind;
   phase: string;
   message: string;
+  /** 批次：已处理完的文件序号（1-based 显示用 fileIndex+1） */
   current: number;
   total: number;
   percent: number;
   currentPath?: string;
+  outcome?: TaskOutcome;
+  fileFraction?: number;
+  filesSucceeded?: number;
+  filesFailed?: number;
+  unitKind?: ProgressUnitKind;
+  unitCurrent?: number;
+  unitTotal?: number;
+  unitLabel?: string; // 例如 "+2.00° ×0.956 · 近角度"
 }
 
 export interface FfmpegBinaryInfo {
@@ -155,4 +208,11 @@ export interface ReleaseMetadata {
 export interface LaunchContext {
   action?: "encode" | "decode" | "scan" | string;
   files: string[];
+}
+
+export interface DropPathResolution {
+  files: string[];
+  directories: string[];
+  ignoredCount: number;
+  truncated: boolean;
 }
