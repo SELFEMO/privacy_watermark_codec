@@ -8,8 +8,11 @@ import { open } from "@tauri-apps/plugin-dialog";
 import BrandMark from "./components/BrandMark.vue";
 import type {
   CancelTaskRequest,
+  DecodeItemEvent,
   DecodeRequest,
   DecodeResponse,
+  DropPathResolution,
+  EncodeItemResult,
   EncodeRequest,
   EncodeResponse,
   FfmpegBinaryInfo,
@@ -22,19 +25,26 @@ import type {
   ReleaseMetadata,
   TaskProgressEvent,
   TaskProgressKind,
+  TimelineAnomalyRange,
 } from "./types";
+import { clampFailurePercent } from "./progressDisplay";
 
 type TabId = "encode" | "decode" | "scan" | "ffmpeg";
 type Language = "zh" | "en";
+type DropTarget = "encode-inputs" | "output-directory" | "decode-inputs" | "key-file" | "scan-inputs";
 
 type MessageKey = keyof typeof messages.zh;
+
+const ENCODE_MEDIA_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "mp4", "mov", "mkv", "avi", "webm"];
+const DECODE_MEDIA_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "mp4", "mov", "mkv", "avi", "webm"];
+const SCAN_IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"];
+const KEY_FILE_EXTENSIONS = ["key", "json"];
 
 const messages = {
   zh: {
     appTitle: "图隐私水印编解码器",
     eyebrow: "PRIVACY WATERMARK CODEC",
     subtitle: "不可见频域水印 · 加密载荷 · 感知篡改检测 · 本地离线处理",
-    localOnly: "本地离线处理",
     uiZoomLabel: "界面缩放",
     uiZoomOut: "缩小界面",
     uiZoomIn: "放大界面",
@@ -46,9 +56,9 @@ const messages = {
     mediaOutput: "媒体与输出",
     mediaOutputDesc: "单张、批量图片与常见视频。",
     chooseMedia: "选择图片或视频",
-    chooseMediaHint: "点击打开系统文件选择器",
+    chooseMediaHint: "点击选择，或将图片、视频或文件夹拖到此处",
     chooseOutput: "选择输出文件夹",
-    chooseOutputHint: "所有结果将写入该目录",
+    chooseOutputHint: "点击选择，或将输出文件夹拖到此处",
     contentKey: "内容与密钥",
     contentKeyDesc: "文本先加密，再写入图像亮度频域。",
     watermarkText: "水印文本",
@@ -62,9 +72,9 @@ const messages = {
     paramsRun: "参数与执行",
     paramsRunDesc: "系统会强制检查 PSNR。",
     customPassword: "自定义密码",
-    customPasswordHint: "建议不少于十二个字符",
+    customPasswordHint: "必须不少于十二个字符",
     embedStrength: "嵌入强度",
-    strengthHint: "数值越高越抗压缩，但图像改变量也会增加。",
+    strengthHint: "视频不再偷偷提高到 16；PSNR<40 时逐级降到 4。仍不足请缩短文本或换画面。数值越高越抗压缩，但图像改变量也会增加。",
     frameParallelism: "视频编码并行度",
     frameParallelismHint: "仅影响视频抽帧后的水印嵌入，数值越高越占用 CPU 与磁盘 I/O。",
     decodeFrameParallelism: "视频解码并行度",
@@ -72,6 +82,7 @@ const messages = {
     writeKey: "生成 .key 文件",
     writeKeyCustom: "关闭后仅凭密码解码",
     writeKeyRandom: "随机密钥模式必须生成密钥文件",
+    keyFileWarning: ".key = 能解出水印的完整密钥，勿随图转发",
     startEncode: "开始编码",
     encoding: "正在本地处理…",
     encodeDone: "编码完成",
@@ -79,13 +90,13 @@ const messages = {
     evidenceManifest: "证据清单",
     otherFiles: "其余文件",
     selectDecodeMedia: "选择待检测媒体",
-    selectDecodeMediaDesc: "批量解码应使用同一密钥或密码。",
+    selectDecodeMediaDesc: "支持共享密钥、同一密码，或为独立密钥批量选择多个 .key 文件。",
     chooseWatermarked: "选择已加水印图片或视频",
-    chooseMediaClick: "点击选择媒体",
+    chooseMediaClick: "点击选择，或将媒体文件或文件夹拖到此处",
     credentials: "提供解码凭据",
-    credentialsDesc: "密钥文件和自定义密码任选其一。",
-    chooseKeyFile: "选择 .key 文件",
-    chooseKeyFileHint: "适用于模式 A / B / 已导出密钥的模式 C",
+    credentialsDesc: "可选择一个或多个密钥文件；自定义密码与密钥文件互斥。",
+    chooseKeyFile: "选择一个或多个 .key 文件",
+    chooseKeyFileHint: "点击多选，或拖入 .key / JSON 密钥文件",
     orPassword: "或输入自定义密码",
     passwordModeC: "模式 C 密码",
     startDecode: "开始解码与检测",
@@ -95,19 +106,39 @@ const messages = {
     noObviousTamper: "未发现明显篡改",
     suspiciousChange: "存在可疑变化",
     modified: "检测到修改",
-    fingerprintDistance: "指纹距离",
+    fingerprintDistance: "持钥校验码",
     correctedCodewords: "纠正码字",
     validFrames: "有效帧",
-    modifiedFrames: "修改帧",
+    modifiedFrames: "内容修改帧",
+    missingFrames: "原始缺失帧（删除+替换）",
+    insertedFrames: "插入帧",
+    deletedFrames: "删除帧",
+    duplicateFrames: "重复帧",
+    outOfOrderFrames: "错序帧",
+    replacedFrames: "替换帧",
+    unreadableFrames: "未匹配/不可读帧",
+    transformedFrames: "几何变换帧",
+    timelineAnomalies: "时间轴异常区间",
+    timelineActual: "实际",
+    timelineExpected: "原始",
+    timelineInsertion: "插入",
+    timelineDeletion: "删除",
+    timelineReplacement: "替换",
+    timelineDuplicate: "重复",
+    timelineOutOfOrder: "错序",
+    timelineMore: "另有 {count} 个区间",
+    expectedFrames: "声明总帧",
     tamperRegions: "疑似篡改分区",
     syncRegistration: "同步配准",
     moreResults: "还有 {count} 个结果已完成。",
     decodeResultCount: "已显示全部 {count} 个结果。",
+    decodeStreamingCount: "已完成 {count}/{total}，结果会在每个文件处理结束后立即显示。",
+    decodeFailed: "此文件未能完成解码",
     waitingDecode: "等待解码结果。",
     importUnknown: "导入未知图片",
     importUnknownDesc: "无密钥扫描本软件水印头、C2PA/AI 元数据等痕迹。",
     chooseUnknown: "选择未知来源图片",
-    unknownHint: "支持 PNG / JPEG / WebP / BMP / TIFF，可多选",
+    unknownHint: "支持多选；点击选择，或将图片或文件夹拖到此处",
     scanWatermark: "扫描隐私水印",
     scanning: "正在扫描…",
     scanHint: "未检出时会返回非确定性结论；专有 AI 隐形水印可能需要原厂模型或密钥验证。",
@@ -169,7 +200,7 @@ const messages = {
     cancellingTask: "正在取消…",
     progressCancelled: "任务已取消",
     progressFailed: "任务已结束但未成功",
-    clearKeyFile: "清除密钥",
+    clearKeyFile: "清除全部密钥",
     currentImport: "本次导入",
     clearImportedFiles: "清除导入",
     progressCurrentFile: "当前文件",
@@ -180,26 +211,48 @@ const messages = {
     progressWritingKey: "正在写入密钥文件",
     progressProcessingImage: "正在处理图片",
     progressDecodingImage: "正在解码检测图片",
+    progressRegisteringImage: "正在搜索图片几何配准",
+    progressVerifyingImage: "正在完整验证校正图",
     progressScanningImage: "正在扫描图片",
     progressExtractingFrames: "正在抽取视频帧",
     progressProcessingFrames: "正在处理视频帧",
     progressCheckingFrames: "正在逐帧检测视频",
+    progressRegisteringVideoFrames: "正在恢复视频帧几何同步",
     progressMuxingVideo: "正在封装输出视频",
     progressSummarizingVideo: "正在汇总视频结果",
     progressWritingEvidence: "正在写入证据清单",
     progressCompletedFile: "当前文件已完成",
     progressCompleted: "任务已完成",
+    progressCompletedWithErrors: "任务已结束，部分文件失败",
+    progressFiles: "文件",
+    progressFrames: "帧",
+    progressGeometry: "几何",
+    progressSucceeded: "成功",
+    progressFailedCount: "失败",
     selectedFiles: "已选择 {count} 个文件",
+    dropRelease: "松开鼠标即可导入",
+    dropAppendHint: "可继续拖入追加文件",
+    dropImported: "已通过拖放导入 {accepted} 个文件。",
+    dropImportedIgnored: "已导入 {accepted} 个文件，忽略 {ignored} 个不匹配项目。",
+    dropNothingAccepted: "拖入内容与此选择区域不匹配。",
+    dropAlreadyImported: "拖入文件已在当前列表中，无需重复添加。",
+    dropOutputSet: "已将输出目录设置为：{name}",
+    dropKeySet: "已载入密钥文件：{name}",
+    dropKeysSet: "已载入 {count} 个密钥文件。",
+    dropTruncated: "导入文件过多，已限制为前 {count} 个文件。",
     importedFromContext: "已从右键菜单导入 {count} 个文件。",
     contextEncode: "右键菜单已导入到编码页，请选择输出目录并填写水印文本。",
-    contextDecode: "右键菜单已导入到解码页，请选择密钥文件或输入密码。",
+    contextDecode: "右键菜单已导入到解码页，请选择一个或多个密钥文件，或输入密码。",
     contextScan: "右键菜单已导入到扫描页，已自动开始无密钥扫描。",
+    windowMinimize: "最小化",
+    windowMaximize: "最大化",
+    windowRestore: "还原窗口",
+    windowClose: "关闭",
   },
   en: {
     appTitle: "Privacy Watermark Codec",
     eyebrow: "PRIVACY WATERMARK CODEC",
     subtitle: "Invisible frequency-domain watermark · encrypted payload · perceptual tamper detection · local processing",
-    localOnly: "Local only",
     uiZoomLabel: "UI zoom",
     uiZoomOut: "Zoom out",
     uiZoomIn: "Zoom in",
@@ -211,9 +264,9 @@ const messages = {
     mediaOutput: "Media and output",
     mediaOutputDesc: "Single file, batch images, and common videos.",
     chooseMedia: "Choose images or videos",
-    chooseMediaHint: "Open the system file picker",
+    chooseMediaHint: "Click to choose, or drop images, videos, or folders here",
     chooseOutput: "Choose output folder",
-    chooseOutputHint: "All results will be written here",
+    chooseOutputHint: "Click to choose, or drop the output folder here",
     contentKey: "Content and key",
     contentKeyDesc: "Text is encrypted first, then embedded into image luminance frequency coefficients.",
     watermarkText: "Watermark text",
@@ -227,9 +280,9 @@ const messages = {
     paramsRun: "Parameters and run",
     paramsRunDesc: "PSNR is checked automatically.",
     customPassword: "Custom password",
-    customPasswordHint: "At least twelve characters is recommended",
+    customPasswordHint: "At least twelve characters are required",
     embedStrength: "Embedding strength",
-    strengthHint: "Higher values improve compression robustness but change pixels more.",
+    strengthHint: "Video strength is no longer silently raised to 16; if PSNR is below 40 it steps down to 4. If that is still not enough, shorten the text or pick a different clip. Higher values improve compression robustness but change pixels more.",
     frameParallelism: "Video encode parallelism",
     frameParallelismHint: "Applies after video frame extraction during embedding; higher values use more CPU and disk I/O.",
     decodeFrameParallelism: "Video decode parallelism",
@@ -237,6 +290,7 @@ const messages = {
     writeKey: "Write .key file",
     writeKeyCustom: "Disable this to decode only with the password",
     writeKeyRandom: "Random key modes must write a key file",
+    keyFileWarning: ".key files are the full decryption secret; do not forward them with the media",
     startEncode: "Start encoding",
     encoding: "Processing locally…",
     encodeDone: "Encoding complete",
@@ -244,13 +298,13 @@ const messages = {
     evidenceManifest: "Evidence manifest",
     otherFiles: "Other files",
     selectDecodeMedia: "Select media to inspect",
-    selectDecodeMediaDesc: "Batch decoding should use the same key or password.",
+    selectDecodeMediaDesc: "Use one shared key/password, or select multiple .key files for independently keyed media.",
     chooseWatermarked: "Choose watermarked images or videos",
-    chooseMediaClick: "Choose media files",
+    chooseMediaClick: "Click to choose, or drop media files or folders here",
     credentials: "Provide credentials",
-    credentialsDesc: "Use either a key file or a custom password.",
-    chooseKeyFile: "Choose .key file",
-    chooseKeyFileHint: "For Mode A / B / exported Mode C keys",
+    credentialsDesc: "Choose one or more key files, or use a mutually exclusive custom password.",
+    chooseKeyFile: "Choose one or more .key files",
+    chooseKeyFileHint: "Click for multiple selection, or drop .key / JSON key files here",
     orPassword: "Or enter a custom password",
     passwordModeC: "Mode C password",
     startDecode: "Decode and inspect",
@@ -260,19 +314,39 @@ const messages = {
     noObviousTamper: "No obvious tampering",
     suspiciousChange: "Suspicious change",
     modified: "Modification detected",
-    fingerprintDistance: "Fingerprint distance",
+    fingerprintDistance: "Key-bound check code",
     correctedCodewords: "Corrected codewords",
     validFrames: "Valid frames",
-    modifiedFrames: "Modified frames",
+    modifiedFrames: "Content-modified frames",
+    missingFrames: "Missing originals (deleted + replaced)",
+    insertedFrames: "Inserted frames",
+    deletedFrames: "Deleted frames",
+    duplicateFrames: "Duplicate frames",
+    outOfOrderFrames: "Out-of-order frames",
+    replacedFrames: "Replaced frames",
+    unreadableFrames: "Unmatched/unreadable frames",
+    transformedFrames: "Geometry-transformed frames",
+    timelineAnomalies: "Timeline anomaly ranges",
+    timelineActual: "actual",
+    timelineExpected: "original",
+    timelineInsertion: "insertion",
+    timelineDeletion: "deletion",
+    timelineReplacement: "replacement",
+    timelineDuplicate: "duplicate",
+    timelineOutOfOrder: "out of order",
+    timelineMore: "{count} more range(s)",
+    expectedFrames: "Declared total frames",
     tamperRegions: "Suspicious regions",
     syncRegistration: "Sync registration",
     moreResults: "{count} more result(s) completed.",
     decodeResultCount: "Showing all {count} result(s).",
+    decodeStreamingCount: "Completed {count}/{total}. Each result appears as soon as its file finishes.",
+    decodeFailed: "This file could not be decoded",
     waitingDecode: "Waiting for decode result.",
     importUnknown: "Import unknown images",
     importUnknownDesc: "Scan this app's watermark header, C2PA/AI metadata, and related traces without a key.",
     chooseUnknown: "Choose unknown images",
-    unknownHint: "PNG / JPEG / WebP / BMP / TIFF, multi-select supported",
+    unknownHint: "Multiple selection supported; click or drop images or folders here",
     scanWatermark: "Scan privacy watermark",
     scanning: "Scanning…",
     scanHint: "A negative result is not a guarantee; proprietary AI watermarks may require vendor models or keys.",
@@ -334,7 +408,7 @@ const messages = {
     cancellingTask: "Cancelling…",
     progressCancelled: "Task cancelled",
     progressFailed: "Task finished with errors",
-    clearKeyFile: "Clear key",
+    clearKeyFile: "Clear all keys",
     currentImport: "Current import",
     clearImportedFiles: "Clear import",
     progressCurrentFile: "Current file",
@@ -345,20 +419,43 @@ const messages = {
     progressWritingKey: "Writing key file",
     progressProcessingImage: "Processing image",
     progressDecodingImage: "Decoding image",
+    progressRegisteringImage: "Searching image geometry registration",
+    progressVerifyingImage: "Fully verifying a corrected image",
     progressScanningImage: "Scanning image",
     progressExtractingFrames: "Extracting video frames",
     progressProcessingFrames: "Processing video frames",
     progressCheckingFrames: "Checking video frames",
+    progressRegisteringVideoFrames: "Recovering video-frame geometry",
     progressMuxingVideo: "Muxing output video",
     progressSummarizingVideo: "Summarizing video result",
     progressWritingEvidence: "Writing evidence manifest",
     progressCompletedFile: "Current file completed",
     progressCompleted: "Task completed",
+    progressCompletedWithErrors: "Task finished with some files failing",
+    progressFiles: "Files",
+    progressFrames: "Frames",
+    progressGeometry: "Geometry",
+    progressSucceeded: "Succeeded",
+    progressFailedCount: "Failed",
     selectedFiles: "{count} file(s) selected",
+    dropRelease: "Release to import",
+    dropAppendHint: "Drop more files to append",
+    dropImported: "Imported {accepted} file(s) by drag and drop.",
+    dropImportedIgnored: "Imported {accepted} file(s); ignored {ignored} unmatched item(s).",
+    dropNothingAccepted: "The dropped content does not match this selection area.",
+    dropAlreadyImported: "The dropped files are already in the current list.",
+    dropOutputSet: "Output folder set to: {name}",
+    dropKeySet: "Key file loaded: {name}",
+    dropKeysSet: "Loaded {count} key files.",
+    dropTruncated: "Too many files were dropped; only the first {count} files were imported.",
     importedFromContext: "Imported {count} file(s) from the context menu.",
     contextEncode: "Files were imported into Encode. Choose an output folder and enter watermark text.",
-    contextDecode: "Files were imported into Decode. Choose a key file or enter a password.",
+    contextDecode: "Files were imported into Decode. Choose one or more key files, or enter a password.",
     contextScan: "Files were imported into Scan. The keyless scan started automatically.",
+    windowMinimize: "Minimize",
+    windowMaximize: "Maximize",
+    windowRestore: "Restore window",
+    windowClose: "Close",
   },
 } as const;
 
@@ -385,7 +482,8 @@ const writeKeyFile = ref(true);
 const strength = ref(8);
 const frameParallelism = ref(1);
 const decodeFrameParallelism = ref(1);
-const decodeKeyFile = ref("");
+const decodeKeyFiles = ref<string[]>([]);
+const isWindowMaximized = ref(false);
 const decodePassword = ref("");
 const busy = ref(false);
 const cancelling = ref(false);
@@ -400,29 +498,78 @@ const ffmpegError = ref("");
 const launchBatch = ref<LaunchContext>({ files: [] });
 const taskProgress = ref<TaskProgressEvent | null>(null);
 const activeTaskId = ref("");
+const activeDropTarget = ref<DropTarget | null>(null);
 let launchTimer: number | undefined;
+let contextMessageTimer: number | undefined;
 let unlistenLaunchContext: (() => void) | undefined;
 let unlistenTaskProgress: (() => void) | undefined;
+let unlistenDecodeItem: (() => void) | undefined;
 let unlistenScaleChanged: (() => void) | undefined;
+let unlistenDragDrop: (() => void) | undefined;
+
+watch(contextMessage, (message) => {
+  if (contextMessageTimer !== undefined) {
+    window.clearTimeout(contextMessageTimer);
+    contextMessageTimer = undefined;
+  }
+  if (!message) return;
+  // 操作提示使用短暂浮层而不是占据主布局，是为了让文件导入反馈可见但不挤压三栏工作区。
+  // Operation feedback uses a short-lived overlay instead of layout space so imports remain visible without pushing down the three-column workspace.
+  contextMessageTimer = window.setTimeout(() => {
+    contextMessage.value = "";
+    contextMessageTimer = undefined;
+  }, 3600);
+});
+
+function unicodeScalarCount(value: string): number {
+  return Array.from(value).length;
+}
 
 const canEncode = computed(
   () =>
     encodeInputs.value.length > 0 &&
     outputDir.value.length > 0 &&
     watermarkText.value.trim().length > 0 &&
-    (keyMode.value !== "custom" || customPassword.value.length > 0),
+    (keyMode.value !== "custom" || unicodeScalarCount(customPassword.value) >= 12),
 );
 
 const canDecode = computed(
   () =>
     decodeInputs.value.length > 0 &&
-    (decodeKeyFile.value.length > 0 || decodePassword.value.length > 0),
+    (decodeKeyFiles.value.length > 0 || unicodeScalarCount(decodePassword.value) >= 12),
 );
 
 const canScan = computed(() => scanInputs.value.length > 0);
 const currentMessages = computed(() => messages[language.value]);
-const progressPercent = computed(() => Math.round(Math.max(0, Math.min(taskProgress.value?.percent ?? 0, 100))));
+const progressPercent = computed(() =>
+  clampFailurePercent(
+    taskProgress.value?.percent,
+    taskProgress.value?.percent,
+    taskProgress.value?.outcome ?? taskProgress.value?.phase ?? "running",
+  ),
+);
 const displayProgressMessage = computed(() => formatProgressMessage(taskProgress.value));
+const encodeProgressExtra = computed(() => {
+  const phase = taskProgress.value?.phase;
+  if (!phase || !displayProgressMessage.value) return "";
+  if (
+    [
+      "preparing",
+      "processing-image",
+      "processing-video-frames",
+      "checking-video-frames",
+      "decoding-image",
+      "completed",
+      "completed-file",
+      "completed_with_errors",
+      "failed",
+      "cancelled",
+    ].includes(phase)
+  ) {
+    return "";
+  }
+  return displayProgressMessage.value;
+});
 const displayErrorMessage = computed(() => localizeRuntimeMessage(errorMessage.value));
 const ffmpegBinaries = computed<FfmpegBinaryInfo[]>(() => {
   if (!ffmpegInfo.value) return [];
@@ -531,6 +678,16 @@ function basename(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 
+function encodeItemStatus(item: EncodeItemResult): string {
+  if (item.succeeded === false) {
+    return item.error || t("progressFailed");
+  }
+  if (item.mediaType === "image") {
+    return `PSNR ${item.psnr?.toFixed(2) ?? "-"} dB`;
+  }
+  return `${item.frameCount ?? 0}`;
+}
+
 function containsChinese(text: string): boolean {
   return /[\u4e00-\u9fff]/.test(text);
 }
@@ -556,6 +713,21 @@ function englishProgressMessage(progress: TaskProgressEvent): string {
   const elapsedPart = elapsed ? `, elapsed ${elapsed}s` : "";
   const stagePart = stagePercent ? `, stage ${stagePercent}%` : "";
   const generatedPart = generatedFrames ? `, ${generatedFrames} frame(s) generated` : "";
+  const geometry = message.match(/候选\s*(\d+)\/(\d+)，旋转\s*([+\-0-9.]+)°，缩放\s*×([0-9.]+)/);
+  const verify = message.match(/完整验证第\s*(\d+)\/(\d+)\s*张校正图，旋转\s*([+\-0-9.]+)°，缩放\s*×([0-9.]+)/);
+  const videoVerify = message.match(/完整验证第\s*(\d+)\s*帧第\s*(\d+)\/(\d+)\s*张校正图，旋转\s*([+\-0-9.]+)°，缩放\s*×([0-9.]+)/);
+  const geometryWorkers = message.match(/CPU\s*(\d+)\s*线程/)?.[1];
+  // 英文界面直接从结构化数值重建几何进度，是因为后端阶段标签会持续扩展，逐个翻译中文阶段名既容易遗漏，也会让新增算法在英文界面回退成中文。
+  // The English UI rebuilds geometry progress from structured numbers because backend stage labels keep evolving; translating every Chinese stage name is easy to miss and would make new algorithms fall back to Chinese.
+  const geometryDetail = geometry
+    ? `candidate ${geometry[1]}/${geometry[2]}, rotation ${geometry[3]}°, scale ×${geometry[4]}${geometryWorkers ? `, CPU ${geometryWorkers} threads` : ""}`
+    : "";
+  const verifyDetail = verify
+    ? `${verify[1]}/${verify[2]}, rotation ${verify[3]}°, scale ×${verify[4]}`
+    : "";
+  const videoVerifyDetail = videoVerify
+    ? `frame ${videoVerify[1]}, corrected image ${videoVerify[2]}/${videoVerify[3]}, rotation ${videoVerify[4]}°, scale ×${videoVerify[5]}`
+    : "";
 
   switch (progress.phase) {
     case "preparing":
@@ -568,6 +740,10 @@ function englishProgressMessage(progress: TaskProgressEvent): string {
       return counter ? `Embedding image watermark: ${counter}` : "Embedding image watermark";
     case "decoding-image":
       return counter ? `Decoding and inspecting image: ${counter}` : "Decoding and inspecting image";
+    case "registering-image":
+      return geometryDetail ? `Searching image registration: ${geometryDetail}` : localizeRuntimeMessage(message, progress.phase);
+    case "verifying-image":
+      return verifyDetail ? `Scoring finished, fully verifying corrected image ${verifyDetail}` : localizeRuntimeMessage(message, progress.phase);
     case "scanning-image":
       return counter ? `Scanning image: ${counter}` : "Scanning image";
     case "extracting-video-frames":
@@ -576,6 +752,11 @@ function englishProgressMessage(progress: TaskProgressEvent): string {
       return counter ? `Embedding video-frame watermark: ${counter}` : "Embedding video-frame watermark";
     case "checking-video-frames":
       return counter ? `Decoding and inspecting video frames: ${counter}` : "Decoding and inspecting video frames";
+    case "registering-video-frames":
+      if (videoVerifyDetail) {
+        return `Scoring finished, fully verifying ${videoVerifyDetail}`;
+      }
+      return geometryDetail ? `Recovering video-frame geometry: ${geometryDetail}` : localizeRuntimeMessage(message, progress.phase);
     case "muxing-video":
       return `Muxing output video${stagePart}${elapsedPart}`;
     case "summarizing-video":
@@ -586,6 +767,8 @@ function englishProgressMessage(progress: TaskProgressEvent): string {
       return "Current file completed";
     case "completed":
       return "Task completed";
+    case "completed_with_errors":
+      return "Task finished with some files failing";
     case "failed":
       return "Task finished with errors";
     case "cancelled":
@@ -609,7 +792,13 @@ function localizeRuntimeMessage(message: string, phase?: string): string {
     [/正在准备批量解码检测任务/g, "Preparing batch decode task"],
     [/正在准备检测第\s*(\d+)\/(\d+)\s*个文件/g, "Preparing file $1/$2 for inspection"],
     [/正在解码并检测图片[:：]\s*/g, "Decoding and inspecting image: "],
+    [/正在搜索图片几何配准[:：]候选\s*(\d+)\/(\d+)，旋转\s*([+\-0-9.]+)°，缩放\s*×([0-9.]+)/g, "Searching image registration: candidate $1/$2, rotation $3°, scale ×$4"],
+    [/评分已结束，正在完整验证第\s*(\d+)\/(\d+)\s*张校正图，旋转\s*([+\-0-9.]+)°，缩放\s*×([0-9.]+)/g, "Scoring finished, fully verifying corrected image $1/$2, rotation $3°, scale ×$4"],
+    [/评分已结束，正在完整验证第\s*(\d+)\s*帧第\s*(\d+)\/(\d+)\s*张校正图，旋转\s*([+\-0-9.]+)°，缩放\s*×([0-9.]+)/g, "Scoring finished, fully verifying frame $1 corrected image $2/$3, rotation $4°, scale ×$5"],
+    [/正在恢复第\s*(\d+)\s*帧的几何同步[:：]候选\s*(\d+)\/(\d+)，旋转\s*([+\-0-9.]+)°，缩放\s*×([0-9.]+)/g, "Recovering geometry for frame $1: candidate $2/$3, rotation $4°, scale ×$5"],
+    [/未检测到有效水印头；图片可能没有使用本软件编码，或旋转后铺满裁切\/严重压缩破坏了块周期。无白边的小角度旋转铺满裁切可能对不齐网格；旧一级高频在旋转插值后也可能无法恢复/g, "No valid watermark header was found. The image may not have been encoded with this app, or a rotate-then-fill-crop / heavy compression broke the block period. A small-angle fill-crop without white borders can miss the grid; a legacy first-level high-frequency encoding may also fail after rotation interpolation"],
     [/批量解码检测任务完成/g, "Batch decode task completed"],
+    [/批量解码检测任务结束，部分文件失败/g, "Batch decode finished with some files failing"],
     [/正在准备未知来源图片扫描/g, "Preparing unknown-image scan"],
     [/正在扫描第\s*(\d+)\/(\d+)\s*张图片/g, "Scanning image $1/$2"],
     [/未知来源图片扫描完成/g, "Unknown-image scan completed"],
@@ -709,6 +898,39 @@ function integrityLabel(status: string): string {
   return t("modified");
 }
 
+function timelineAnomalyKindLabel(kind: TimelineAnomalyRange["kind"]): string {
+  const labels: Record<TimelineAnomalyRange["kind"], MessageKey> = {
+    insertion: "timelineInsertion",
+    deletion: "timelineDeletion",
+    replacement: "timelineReplacement",
+    duplicate: "timelineDuplicate",
+    out_of_order: "timelineOutOfOrder",
+  };
+  return t(labels[kind]);
+}
+
+function timelineFrameRange(start?: number, end?: number): string {
+  if (!start) return "-";
+  return end && end !== start ? `${start}-${end}` : String(start);
+}
+
+function timelineAnomalySummary(ranges: TimelineAnomalyRange[]): string {
+  const visible = ranges.slice(0, 8).map((range) => {
+    const kind = timelineAnomalyKindLabel(range.kind);
+    const actual = range.physicalStartFrame
+      ? `${t("timelineActual")} ${timelineFrameRange(range.physicalStartFrame, range.physicalEndFrame)}`
+      : "";
+    const expected = range.expectedStartFrame
+      ? `${t("timelineExpected")} ${timelineFrameRange(range.expectedStartFrame, range.expectedEndFrame)}`
+      : "";
+    return `${kind} ${[actual, expected].filter(Boolean).join(" / ")}`.trim();
+  });
+  if (ranges.length > visible.length) {
+    visible.push(t("timelineMore", { count: ranges.length - visible.length }));
+  }
+  return visible.join(" · ");
+}
+
 function detectionAccessLabel(detection: ScanDetection): string {
   return detection.needsKey ? t("needKey") : t("readable");
 }
@@ -766,19 +988,49 @@ function progressPhaseLabel(phase?: string): string {
     "writing-key": "progressWritingKey",
     "processing-image": "progressProcessingImage",
     "decoding-image": "progressDecodingImage",
+    "registering-image": "progressRegisteringImage",
+    "verifying-image": "progressVerifyingImage",
     "scanning-image": "progressScanningImage",
     "extracting-video-frames": "progressExtractingFrames",
     "processing-video-frames": "progressProcessingFrames",
     "checking-video-frames": "progressCheckingFrames",
+    "registering-video-frames": "progressRegisteringVideoFrames",
     "muxing-video": "progressMuxingVideo",
     "summarizing-video": "progressSummarizingVideo",
     "writing-evidence": "progressWritingEvidence",
     "completed-file": "progressCompletedFile",
     completed: "progressCompleted",
+    completed_with_errors: "progressCompletedWithErrors",
     cancelled: "progressCancelled",
     failed: "progressFailed",
   };
   return t(labels[phase || "queued"] || "progressPreparing");
+}
+
+function outcomeLabel(outcome?: string, phase?: string): string {
+  if (outcome === "completed_with_errors") {
+    return t("progressCompletedWithErrors");
+  }
+  if (outcome === "failed") {
+    return t("progressFailed");
+  }
+  if (outcome === "cancelled") {
+    return t("progressCancelled");
+  }
+  if (outcome === "completed") {
+    return t("progressCompleted");
+  }
+  return progressPhaseLabel(phase);
+}
+
+function unitKindLabel(kind?: string): string {
+  if (kind === "frame") {
+    return t("progressFrames");
+  }
+  if (kind === "geometry") {
+    return t("progressGeometry");
+  }
+  return t("progressFiles");
 }
 
 
@@ -790,6 +1042,8 @@ function handleTaskError(error: unknown) {
         ...taskProgress.value,
         phase: "cancelled",
         message: t("progressCancelled"),
+        outcome: "cancelled",
+        percent: clampFailurePercent(taskProgress.value.percent, taskProgress.value.percent, "cancelled"),
       };
     }
     return;
@@ -800,9 +1054,148 @@ function handleTaskError(error: unknown) {
       ...taskProgress.value,
       phase: "failed",
       message,
-      percent: 100,
+      outcome: "failed",
+      percent: clampFailurePercent(taskProgress.value.percent, taskProgress.value.percent, "failed"),
     };
   }
+}
+
+function pickerHint(paths: string[], emptyHint: MessageKey): string {
+  return paths.length
+    ? `${t("selectedFiles", { count: paths.length })} · ${t("dropAppendHint")}`
+    : t(emptyHint);
+}
+
+function mergeUniquePaths(current: string[], incoming: string[]): string[] {
+  const merged = current.slice();
+  const seen = new Set(current.map((path) => path.toLocaleLowerCase()));
+  for (const path of incoming) {
+    const key = path.toLocaleLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(path);
+    }
+  }
+  return merged;
+}
+
+function dropTargetAtPosition(position: { x: number; y: number }): DropTarget | null {
+  const scaleFactor = Number(document.documentElement.dataset.scaleFactor || window.devicePixelRatio || 1);
+  const candidatePoints = [
+    { x: position.x / Math.max(scaleFactor, 0.1), y: position.y / Math.max(scaleFactor, 0.1) },
+    { x: position.x, y: position.y },
+  ];
+
+  // Tauri 在桌面端报告物理坐标，但不同 WebView/缩放组合可能已经转换为逻辑坐标；依次尝试两种坐标可避免高 DPI 下高亮错位。
+  // Tauri normally reports physical coordinates, while some WebView/zoom combinations already expose logical coordinates; trying both prevents misplaced highlights on HiDPI displays.
+  for (const point of candidatePoints) {
+    const element = document.elementsFromPoint(point.x, point.y)
+      .map((item) => item.closest<HTMLElement>("[data-drop-target]"))
+      .find((item): item is HTMLElement => Boolean(item));
+    const target = element?.dataset.dropTarget as DropTarget | undefined;
+    if (target) return target;
+  }
+  return null;
+}
+
+async function resolveDroppedPaths(
+  paths: string[],
+  allowedExtensions: string[],
+  expandDirectories: boolean,
+): Promise<DropPathResolution> {
+  return invoke<DropPathResolution>("resolve_drop_paths", {
+    request: { paths, allowedExtensions, expandDirectories },
+  });
+}
+
+function showDropImportFeedback(accepted: number, ignored: number, truncated: boolean) {
+  if (accepted === 0) {
+    errorMessage.value = t("dropNothingAccepted");
+    return;
+  }
+  contextMessage.value = ignored > 0
+    ? t("dropImportedIgnored", { accepted, ignored })
+    : t("dropImported", { accepted });
+  if (truncated) {
+    contextMessage.value = `${contextMessage.value} ${t("dropTruncated", { count: accepted })}`;
+  }
+}
+
+async function applyDroppedPaths(target: DropTarget, paths: string[]) {
+  if (busy.value || paths.length === 0) return;
+  errorMessage.value = "";
+
+  if (target === "output-directory") {
+    const resolved = await resolveDroppedPaths(paths, [], false);
+    const directory = resolved.directories[0];
+    if (!directory) {
+      errorMessage.value = t("dropNothingAccepted");
+      return;
+    }
+    outputDir.value = directory;
+    contextMessage.value = t("dropOutputSet", { name: basename(directory) });
+    return;
+  }
+
+  if (target === "key-file") {
+    const resolved = await resolveDroppedPaths(paths, KEY_FILE_EXTENSIONS, false);
+    if (resolved.files.length === 0) {
+      errorMessage.value = t("dropNothingAccepted");
+      return;
+    }
+    const previousCount = decodeKeyFiles.value.length;
+    decodeKeyFiles.value = mergeUniquePaths(decodeKeyFiles.value, resolved.files);
+    const addedCount = decodeKeyFiles.value.length - previousCount;
+    decodePassword.value = "";
+    // 密钥拖放采用追加而非覆盖，是为了让独立密钥模式的多张图片可在一次任务中自动按 salt 匹配。
+    // Key-file drops append instead of replacing so independently keyed images can be matched by salt in one batch task.
+    contextMessage.value = addedCount === 1
+      ? t("dropKeySet", { name: basename(resolved.files[0]) })
+      : t("dropKeysSet", { count: addedCount });
+    return;
+  }
+
+  const policy = target === "encode-inputs"
+    ? { extensions: ENCODE_MEDIA_EXTENSIONS, destination: encodeInputs }
+    : target === "decode-inputs"
+      ? { extensions: DECODE_MEDIA_EXTENSIONS, destination: decodeInputs }
+      : { extensions: SCAN_IMAGE_EXTENSIONS, destination: scanInputs };
+  const resolved = await resolveDroppedPaths(paths, policy.extensions, true);
+  const previousCount = policy.destination.value.length;
+  policy.destination.value = mergeUniquePaths(policy.destination.value, resolved.files);
+  const addedCount = policy.destination.value.length - previousCount;
+  if (addedCount === 0 && resolved.files.length > 0) {
+    contextMessage.value = t("dropAlreadyImported");
+    return;
+  }
+  showDropImportFeedback(addedCount, resolved.ignoredCount, resolved.truncated);
+}
+
+async function registerNativeDragDrop() {
+  // 使用 Tauri 原生拖放事件才能取得真实文件系统路径；浏览器 File 对象不会可靠暴露桌面绝对路径，无法交给 Rust 后端处理。
+  // Tauri's native drag-drop event is required to obtain real filesystem paths; browser File objects do not reliably expose desktop absolute paths for the Rust backend.
+  unlistenDragDrop = await getCurrentWebview().onDragDropEvent((event) => {
+    const payload = event.payload;
+    if (busy.value) {
+      activeDropTarget.value = null;
+      return;
+    }
+    if (payload.type === "over") {
+      activeDropTarget.value = dropTargetAtPosition(payload.position);
+      return;
+    }
+    if (payload.type === "drop") {
+      const target = dropTargetAtPosition(payload.position) || activeDropTarget.value;
+      activeDropTarget.value = null;
+      if (target) {
+        void applyDroppedPaths(target, payload.paths).catch((error) => {
+          errorMessage.value = String(error);
+        });
+      }
+      return;
+    }
+    activeDropTarget.value = null;
+  });
 }
 
 async function chooseEncodeInputs() {
@@ -812,7 +1205,7 @@ async function chooseEncodeInputs() {
     filters: [
       {
         name: language.value === "zh" ? "图片与视频" : "Images and videos",
-        extensions: ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "mp4", "mov", "mkv", "avi", "webm"],
+        extensions: ENCODE_MEDIA_EXTENSIONS,
       },
     ],
   });
@@ -826,7 +1219,7 @@ async function chooseDecodeInputs() {
     filters: [
       {
         name: language.value === "zh" ? "已加水印的图片与视频" : "Watermarked images and videos",
-        extensions: ["png", "jpg", "jpeg", "webp", "mp4", "mov", "mkv", "avi", "webm"],
+        extensions: DECODE_MEDIA_EXTENSIONS,
       },
     ],
   });
@@ -840,7 +1233,7 @@ async function chooseScanInputs() {
     filters: [
       {
         name: language.value === "zh" ? "未知来源图片" : "Unknown images",
-        extensions: ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
+        extensions: SCAN_IMAGE_EXTENSIONS,
       },
     ],
   });
@@ -854,28 +1247,47 @@ async function chooseOutputDir() {
 
 async function chooseKeyFile() {
   const selected = await open({
-    multiple: false,
+    multiple: true,
     directory: false,
-    filters: [{ name: language.value === "zh" ? "水印密钥" : "Watermark key", extensions: ["key", "json"] }],
+    filters: [{ name: language.value === "zh" ? "水印密钥" : "Watermark keys", extensions: KEY_FILE_EXTENSIONS }],
   });
-  if (typeof selected === "string") {
-    decodeKeyFile.value = selected;
+  if (selected) {
+    const paths = Array.isArray(selected) ? selected : [selected];
+    decodeKeyFiles.value = mergeUniquePaths(decodeKeyFiles.value, paths);
     decodePassword.value = "";
   }
 }
 
 function clearDecodeKeyFile() {
-  decodeKeyFile.value = "";
+  decodeKeyFiles.value = [];
 }
 
 watch(decodePassword, (value) => {
-  if (value.length > 0 && decodeKeyFile.value.length > 0) {
+  if (value.length > 0 && decodeKeyFiles.value.length > 0) {
     // 密码输入和 Key 文件互斥，避免界面同时显示两种凭据而用户无法判断实际使用哪一种。
     // Password input and key files are mutually exclusive so users do not see two credentials without knowing which one is used.
-    decodeKeyFile.value = "";
+    decodeKeyFiles.value = [];
   }
 });
 
+
+async function minimizeWindow() {
+  await getCurrentWindow().minimize();
+}
+
+async function toggleWindowMaximize() {
+  const window = getCurrentWindow();
+  await window.toggleMaximize();
+  isWindowMaximized.value = await window.isMaximized();
+}
+
+async function closeWindow() {
+  await getCurrentWindow().close();
+}
+
+async function syncWindowState() {
+  isWindowMaximized.value = await getCurrentWindow().isMaximized();
+}
 
 async function runEncode() {
   if (!canEncode.value || busy.value) return;
@@ -906,6 +1318,18 @@ async function runEncode() {
   }
 }
 
+function mergeStreamingDecodeItem(event: DecodeItemEvent) {
+  if (event.taskId && event.taskId !== activeTaskId.value) return;
+  const current = decodeResult.value?.items.slice() || [];
+  const existingIndex = current.findIndex((item) => item.inputPath === event.item.inputPath);
+  if (existingIndex >= 0) current.splice(existingIndex, 1, event.item);
+  else current.push(event.item);
+
+  // 单文件完成事件只替换同一路径的条目，是为了让批处理结果逐项出现，同时防止最终响应或重复事件在界面中生成重复卡片。
+  // A completed-file event replaces the item for the same path so batch results appear incrementally without duplicate cards when the final response or a repeated event arrives.
+  decodeResult.value = { items: current };
+}
+
 async function runDecode() {
   if (!canDecode.value || busy.value) return;
   busy.value = true;
@@ -915,14 +1339,19 @@ async function runDecode() {
 
   const request: DecodeRequest = {
     inputPaths: decodeInputs.value,
-    keyFile: decodeKeyFile.value || undefined,
+    keyFiles: decodeKeyFiles.value.length ? decodeKeyFiles.value : undefined,
     customPassword: decodePassword.value || undefined,
     frameParallelism: decodeFrameParallelism.value,
     taskId,
   };
 
   try {
-    decodeResult.value = await invoke<DecodeResponse>("decode_media", { request });
+    const response = await invoke<DecodeResponse>("decode_media", { request });
+    if (activeTaskId.value === taskId) {
+      // 最终响应作为权威快照覆盖流式列表，是为了补齐极端情况下漏到前端的事件，同时保持后端输入顺序。
+      // The final response replaces the streamed list as an authoritative snapshot, recovering any event missed by the frontend while preserving backend input order.
+      decodeResult.value = response;
+    }
   } catch (error) {
     handleTaskError(error);
   } finally {
@@ -1035,6 +1464,7 @@ onMounted(() => {
   updateViewportScale();
   void applyUiZoom();
   void syncDisplayScaleInfo();
+  void syncWindowState();
   void getCurrentWindow().onScaleChanged(({ payload }) => {
     document.documentElement.dataset.scaleFactor = payload.scaleFactor.toFixed(2);
     void applyUiZoom();
@@ -1043,16 +1473,31 @@ onMounted(() => {
   });
   void applyInitialLaunchContext();
   void loadReleaseInfo();
+  void registerNativeDragDrop().catch((error) => {
+    errorMessage.value = String(error);
+  });
   void listen<LaunchContext>("pwc-launch-context", (event) => {
     mergeLaunchContext(event.payload);
   }).then((unlisten) => {
     unlistenLaunchContext = unlisten;
   });
+  void listen<DecodeItemEvent>("pwc-decode-item", (event) => {
+    mergeStreamingDecodeItem(event.payload);
+  }).then((unlisten) => {
+    unlistenDecodeItem = unlisten;
+  });
   void listen<TaskProgressEvent>("pwc-task-progress", (event) => {
     if (!event.payload.taskId || event.payload.taskId === activeTaskId.value) {
       // 只接收当前任务的进度，避免上一次后台事件延迟到达后覆盖新任务状态。
       // Only the active task progress is accepted so delayed events from a previous task cannot overwrite the new task state.
-      taskProgress.value = event.payload;
+      taskProgress.value = {
+        ...event.payload,
+        percent: clampFailurePercent(
+          taskProgress.value?.percent,
+          event.payload.percent,
+          event.payload.outcome ?? event.payload.phase,
+        ),
+      };
     }
   }).then((unlisten) => {
     unlistenTaskProgress = unlisten;
@@ -1063,9 +1508,12 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (launchTimer !== undefined) window.clearTimeout(launchTimer);
+  if (contextMessageTimer !== undefined) window.clearTimeout(contextMessageTimer);
   unlistenLaunchContext?.();
   unlistenTaskProgress?.();
+  unlistenDecodeItem?.();
   unlistenScaleChanged?.();
+  unlistenDragDrop?.();
   window.removeEventListener("resize", updateViewportScale);
   window.visualViewport?.removeEventListener("resize", updateViewportScale);
 });
@@ -1073,8 +1521,8 @@ onBeforeUnmount(() => {
 
 <template>
   <main :class="['shell', `lang-${language}`]">
-    <header class="hero">
-      <div class="hero-copy hero-branding">
+    <header class="hero" data-tauri-drag-region>
+      <div class="hero-copy hero-branding" data-tauri-drag-region>
         <BrandMark />
         <div>
           <p class="eyebrow">{{ t("eyebrow") }}</p>
@@ -1083,19 +1531,22 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="hero-side">
-        <div class="security-badge">
-          <span class="badge-dot"></span>
-          {{ t("localOnly") }}
+        <div class="window-controls" aria-label="Window controls">
+          <button class="minimize-window" type="button" :aria-label="t('windowMinimize')" :title="t('windowMinimize')" @click="minimizeWindow"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9" /></svg></button>
+          <button type="button" :aria-label="isWindowMaximized ? t('windowRestore') : t('windowMaximize')" :title="isWindowMaximized ? t('windowRestore') : t('windowMaximize')" @click="toggleWindowMaximize"><svg v-if="isWindowMaximized" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="5.5" width="7" height="7" rx="1" /><path d="M5.5 5.5V4.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1" /></svg><svg v-else viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.2" /></svg></button>
+          <button class="close-window" type="button" :aria-label="t('windowClose')" :title="t('windowClose')" @click="closeWindow"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg></button>
         </div>
-        <div class="language-switch" aria-label="Language switch">
-          <button :class="{ active: language === 'zh' }" @click="setLanguage('zh')">中</button>
-          <button :class="{ active: language === 'en' }" @click="setLanguage('en')">EN</button>
-        </div>
-        <div class="zoom-control" :aria-label="t('uiZoomLabel')">
-          <span>{{ t("uiZoomLabel") }} {{ Math.round(uiZoom * 100) }}%</span>
-          <button type="button" :aria-label="t('uiZoomOut')" :disabled="uiZoom <= MIN_UI_ZOOM" @click="setUiZoom(uiZoom - UI_ZOOM_STEP)">−</button>
-          <button type="button" @click="resetUiZoom">{{ t("uiZoomReset") }}</button>
-          <button type="button" :aria-label="t('uiZoomIn')" :disabled="uiZoom >= MAX_UI_ZOOM" @click="setUiZoom(uiZoom + UI_ZOOM_STEP)">+</button>
+        <div class="hero-preferences">
+          <div class="language-switch" aria-label="Language switch">
+            <button :class="{ active: language === 'zh' }" @click="setLanguage('zh')">中</button>
+            <button :class="{ active: language === 'en' }" @click="setLanguage('en')">EN</button>
+          </div>
+          <div class="zoom-control" :aria-label="t('uiZoomLabel')">
+            <span>{{ t("uiZoomLabel") }} {{ Math.round(uiZoom * 100) }}%</span>
+            <button type="button" :aria-label="t('uiZoomOut')" :disabled="uiZoom <= MIN_UI_ZOOM" @click="setUiZoom(uiZoom - UI_ZOOM_STEP)">−</button>
+            <button type="button" @click="resetUiZoom">{{ t("uiZoomReset") }}</button>
+            <button type="button" :aria-label="t('uiZoomIn')" :disabled="uiZoom >= MAX_UI_ZOOM" @click="setUiZoom(uiZoom + UI_ZOOM_STEP)">+</button>
+          </div>
         </div>
       </div>
     </header>
@@ -1107,17 +1558,21 @@ onBeforeUnmount(() => {
       <button :class="{ active: activeTab === 'ffmpeg' }" @click="selectTab('ffmpeg')">{{ t("tabFfmpeg") }}</button>
     </nav>
 
-    <div v-if="contextMessage" class="context-banner">
-      <span>{{ contextMessage }}</span>
-      <button type="button" @click="contextMessage = ''">×</button>
-    </div>
+    <Teleport to="body">
+      <Transition name="context-toast">
+        <div v-if="contextMessage" class="context-banner" role="status" aria-live="polite">
+          <span>{{ contextMessage }}</span>
+          <button type="button" :aria-label="t('windowClose')" @click="contextMessage = ''">×</button>
+        </div>
+      </Transition>
+    </Teleport>
 
     <section v-if="activeTab === 'encode'" class="panel panel-grid encode-grid">
       <article class="card">
         <div class="section-heading"><span>01</span><div><h2>{{ t("mediaOutput") }}</h2><p>{{ t("mediaOutputDesc") }}</p></div></div>
-        <button class="file-picker" @click="chooseEncodeInputs"><strong>{{ t("chooseMedia") }}</strong><span>{{ encodeInputs.length ? t("selectedFiles", { count: encodeInputs.length }) : t("chooseMediaHint") }}</span></button>
+        <button :class="['file-picker', { 'drag-active': activeDropTarget === 'encode-inputs' }]" type="button" data-drop-target="encode-inputs" :disabled="busy" @click="chooseEncodeInputs"><strong>{{ t("chooseMedia") }}</strong><span>{{ activeDropTarget === "encode-inputs" ? t("dropRelease") : pickerHint(encodeInputs, "chooseMediaHint") }}</span></button>
         <div v-if="encodeInputs.length" class="import-summary"><div class="import-summary-head"><small>{{ t("currentImport") }}</small><button type="button" :disabled="busy" @click="clearEncodeInputs">{{ t("clearImportedFiles") }}</button></div><div class="file-list inline-list"><span v-for="name in previewNames(encodeInputs)" :key="name">{{ name }}</span><span v-if="restCount(encodeInputs)">+{{ restCount(encodeInputs) }}</span></div></div>
-        <button class="file-picker" @click="chooseOutputDir"><strong>{{ t("chooseOutput") }}</strong><span>{{ outputDir || t("chooseOutputHint") }}</span></button>
+        <button :class="['file-picker', { 'drag-active': activeDropTarget === 'output-directory' }]" type="button" data-drop-target="output-directory" :disabled="busy" @click="chooseOutputDir"><strong>{{ t("chooseOutput") }}</strong><span>{{ activeDropTarget === "output-directory" ? t("dropRelease") : (outputDir || t("chooseOutputHint")) }}</span></button>
       </article>
 
       <article class="card main-card">
@@ -1133,26 +1588,85 @@ onBeforeUnmount(() => {
       <article class="card action-card">
         <div class="section-heading"><span>03</span><div><h2>{{ t("paramsRun") }}</h2><p>{{ t("paramsRunDesc") }}</p></div></div>
         <label v-if="keyMode === 'custom'" class="field"><span>{{ t("customPassword") }}</span><input v-model="customPassword" type="password" autocomplete="new-password" :placeholder="t('customPasswordHint')" /></label>
-        <label class="field range-field"><span>{{ t("embedStrength") }}: {{ strength }}</span><input v-model.number="strength" type="range" min="5" max="14" step="1" /><small>{{ t("strengthHint") }}</small></label>
+        <label class="field range-field"><span>{{ t("embedStrength") }}: {{ strength }}</span><input v-model.number="strength" type="range" min="3" max="20" step="1" /><small>{{ t("strengthHint") }}</small></label>
         <label class="field range-field"><span>{{ t("frameParallelism") }}: {{ frameParallelism }}</span><input v-model.number="frameParallelism" type="range" min="1" max="8" step="1" /><small>{{ t("frameParallelismHint") }}</small></label>
         <label class="toggle-row"><input v-model="writeKeyFile" type="checkbox" :disabled="keyMode !== 'custom'" /><span><strong>{{ t("writeKey") }}</strong><small>{{ keyMode === "custom" ? t("writeKeyCustom") : t("writeKeyRandom") }}</small></span></label>
+        <small class="field-warning">{{ t("keyFileWarning") }}</small>
         <div class="task-actions">
           <button class="primary" :disabled="!canEncode || busy" @click="runEncode">{{ busy ? t("encoding") : t("startEncode") }}</button>
           <button v-if="showProgress('encode') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button>
         </div>
-        <div v-if="showProgress('encode')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ progressPhaseLabel(taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}: {{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressCounter") }}: {{ taskProgress.current }}/{{ taskProgress.total }}</small><small v-if="displayProgressMessage">{{ displayProgressMessage }}</small></div>
-        <div v-if="encodeResult" class="result-card success"><h3>{{ t("encodeDone") }}</h3><p>{{ t("output") }}: {{ encodeResult.outputRoot }}</p><p v-if="encodeResult.manifestPath">{{ t("evidenceManifest") }}: {{ encodeResult.manifestPath }}</p><div class="result-items"><article v-for="item in encodeResult.items.slice(0, 3)" :key="item.outputPath"><strong>{{ basename(item.outputPath) }}</strong><span>{{ item.mediaType === "image" ? `PSNR ${item.psnr?.toFixed(2) ?? "-"} dB` : `${item.frameCount ?? 0}` }}</span></article><article v-if="encodeResult.items.length > 3"><strong>{{ t("otherFiles") }}</strong><span>+{{ encodeResult.items.length - 3 }}</span></article></div></div>
+        <div v-if="showProgress('encode') && !encodeResult" class="progress-card encode-progress">
+          <div class="progress-top">
+            <strong>{{ t("progressTitle") }}</strong>
+            <span>{{ progressPercent }}%</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div>
+          <p class="progress-phase">{{ outcomeLabel(taskProgress?.outcome, taskProgress?.phase) }}</p>
+          <p class="progress-meta">
+            <span v-if="taskProgress?.currentPath">{{ basename(taskProgress.currentPath) }}</span>
+            <span v-if="taskProgress?.total">{{ t("progressFiles") }} {{ taskProgress.current }}/{{ taskProgress.total }} · {{ t("progressSucceeded") }} {{ taskProgress.filesSucceeded ?? 0 }} · {{ t("progressFailedCount") }} {{ taskProgress.filesFailed ?? 0 }}</span>
+            <span v-if="taskProgress?.unitTotal">{{ unitKindLabel(taskProgress.unitKind) }} {{ taskProgress.unitCurrent }}/{{ taskProgress.unitTotal }}</span>
+            <span v-if="encodeProgressExtra">{{ encodeProgressExtra }}</span>
+          </p>
+        </div>
+        <div v-if="encodeResult" :class="['result-card', encodeResult.items.some((item) => item.succeeded === false) ? '' : 'success']">
+          <h3>{{ encodeResult.items.some((item) => item.succeeded === false) ? t("progressCompletedWithErrors") : t("encodeDone") }}</h3>
+          <p>{{ t("output") }}: {{ encodeResult.outputRoot }}</p>
+          <p v-if="encodeResult.manifestPath">{{ t("evidenceManifest") }}: {{ encodeResult.manifestPath }}</p>
+          <p class="field-warning">{{ t("keyFileWarning") }}</p>
+          <div class="result-items">
+            <article v-for="item in encodeResult.items" :key="item.outputPath || item.inputPath">
+              <strong>{{ basename(item.outputPath || item.inputPath) }}</strong>
+              <span>{{ encodeItemStatus(item) }}</span>
+              <small class="path-line">{{ item.outputPath || item.inputPath }}</small>
+            </article>
+          </div>
+        </div>
       </article>
     </section>
 
     <section v-else-if="activeTab === 'decode'" class="panel panel-grid decode-grid">
-      <article class="card"><div class="section-heading"><span>01</span><div><h2>{{ t("selectDecodeMedia") }}</h2><p>{{ t("selectDecodeMediaDesc") }}</p></div></div><button class="file-picker tall" @click="chooseDecodeInputs"><strong>{{ t("chooseWatermarked") }}</strong><span>{{ decodeInputs.length ? t("selectedFiles", { count: decodeInputs.length }) : t("chooseMediaClick") }}</span></button><div v-if="decodeInputs.length" class="import-summary"><div class="import-summary-head"><small>{{ t("currentImport") }}</small><button type="button" :disabled="busy" @click="clearDecodeInputs">{{ t("clearImportedFiles") }}</button></div><div class="file-list inline-list"><span v-for="name in previewNames(decodeInputs)" :key="name">{{ name }}</span><span v-if="restCount(decodeInputs)">+{{ restCount(decodeInputs) }}</span></div></div></article>
-      <article class="card action-card"><div class="section-heading"><span>02</span><div><h2>{{ t("credentials") }}</h2><p>{{ t("credentialsDesc") }}</p></div></div><div class="credential-picker"><button class="file-picker" @click="chooseKeyFile"><strong>{{ t("chooseKeyFile") }}</strong><span>{{ decodeKeyFile ? basename(decodeKeyFile) : t("chooseKeyFileHint") }}</span></button><button v-if="decodeKeyFile" class="secondary-button clear-key-button" type="button" @click="clearDecodeKeyFile">{{ t("clearKeyFile") }}</button></div><label class="field"><span>{{ t("orPassword") }}</span><input v-model="decodePassword" type="password" autocomplete="current-password" :placeholder="t('passwordModeC')" /></label><label class="field range-field"><span>{{ t("decodeFrameParallelism") }}: {{ decodeFrameParallelism }}</span><input v-model.number="decodeFrameParallelism" type="range" min="1" max="8" step="1" /><small>{{ t("decodeFrameParallelismHint") }}</small></label><div class="task-actions"><button class="primary" :disabled="!canDecode || busy" @click="runDecode">{{ busy ? t("decoding") : t("startDecode") }}</button><button v-if="showProgress('decode') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div><div v-if="showProgress('decode')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ progressPhaseLabel(taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}: {{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressCounter") }}: {{ taskProgress.current }}/{{ taskProgress.total }}</small><small v-if="displayProgressMessage">{{ displayProgressMessage }}</small></div></article>
-      <article class="card result-panel"><div class="section-heading"><span>03</span><div><h2>{{ t("detectResult") }}</h2><p>{{ t("detectResultDesc") }}</p></div></div><div v-if="decodeResult" class="result-card success decode-results"><p class="result-count">{{ t("decodeResultCount", { count: decodeResult.items.length }) }}</p><article v-for="(item, index) in decodeResult.items" :key="item.inputPath" class="decode-item"><div class="decode-title"><strong>{{ index + 1 }}. {{ basename(item.inputPath) }}</strong><span :class="['integrity', item.integrity]">{{ integrityLabel(item.integrity) }}</span></div><p class="watermark-output">{{ item.text }}</p><small class="path-line">{{ item.inputPath }}</small><small v-if="item.mediaType === 'image'">{{ t("fingerprintDistance") }} {{ item.fingerprintDistance ?? "-" }} · {{ t("correctedCodewords") }} {{ item.correctedCodewords }}</small><small v-else>{{ t("validFrames") }} {{ item.validFrames ?? 0 }}/{{ item.frameCount ?? 0 }} · {{ t("modifiedFrames") }} {{ item.modifiedFrames ?? 0 }}</small><small v-if="item.syncRegistration">{{ t("syncRegistration") }} {{ item.syncRegistration.rotationDegrees }}° / ×{{ item.syncRegistration.scale.toFixed(2) }} / {{ item.syncRegistration.score.toFixed(2) }}</small><small v-if="item.tamperRegions.length">{{ t("tamperRegions") }} {{ item.tamperRegions.length }}</small></article></div><p v-else class="empty-state">{{ t("waitingDecode") }}</p></article>
+      <article class="card"><div class="section-heading"><span>01</span><div><h2>{{ t("selectDecodeMedia") }}</h2><p>{{ t("selectDecodeMediaDesc") }}</p></div></div><button :class="['file-picker tall', { 'drag-active': activeDropTarget === 'decode-inputs' }]" type="button" data-drop-target="decode-inputs" :disabled="busy" @click="chooseDecodeInputs"><strong>{{ t("chooseWatermarked") }}</strong><span>{{ activeDropTarget === "decode-inputs" ? t("dropRelease") : pickerHint(decodeInputs, "chooseMediaClick") }}</span></button><div v-if="decodeInputs.length" class="import-summary"><div class="import-summary-head"><small>{{ t("currentImport") }}</small><button type="button" :disabled="busy" @click="clearDecodeInputs">{{ t("clearImportedFiles") }}</button></div><div class="file-list inline-list"><span v-for="name in previewNames(decodeInputs)" :key="name">{{ name }}</span><span v-if="restCount(decodeInputs)">+{{ restCount(decodeInputs) }}</span></div></div></article>
+      <article class="card action-card">
+        <div class="section-heading"><span>02</span><div><h2>{{ t("credentials") }}</h2><p>{{ t("credentialsDesc") }}</p></div></div>
+        <div class="credential-picker">
+          <button :class="['file-picker', { 'drag-active': activeDropTarget === 'key-file' }]" type="button" data-drop-target="key-file" :disabled="busy" @click="chooseKeyFile">
+            <strong>{{ t("chooseKeyFile") }}</strong>
+            <span>{{ activeDropTarget === "key-file" ? t("dropRelease") : pickerHint(decodeKeyFiles, "chooseKeyFileHint") }}</span>
+          </button>
+          <div v-if="decodeKeyFiles.length" class="import-summary key-import-summary">
+            <div class="file-list inline-list"><span v-for="name in previewNames(decodeKeyFiles)" :key="name">{{ name }}</span><span v-if="restCount(decodeKeyFiles)">+{{ restCount(decodeKeyFiles) }}</span></div>
+          </div>
+          <button v-if="decodeKeyFiles.length" class="secondary-button clear-key-button" type="button" @click="clearDecodeKeyFile">{{ t("clearKeyFile") }}</button>
+        </div>
+        <label class="field"><span>{{ t("orPassword") }}</span><input v-model="decodePassword" type="password" autocomplete="current-password" :placeholder="t('passwordModeC')" /></label>
+        <label class="field range-field"><span>{{ t("decodeFrameParallelism") }}: {{ decodeFrameParallelism }}</span><input v-model.number="decodeFrameParallelism" type="range" min="1" max="8" step="1" /><small>{{ t("decodeFrameParallelismHint") }}</small></label>
+        <div class="task-actions"><button class="primary" :disabled="!canDecode || busy" @click="runDecode">{{ busy ? t("decoding") : t("startDecode") }}</button><button v-if="showProgress('decode') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div>
+        <div v-if="showProgress('decode')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ outcomeLabel(taskProgress?.outcome, taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}: {{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressFiles") }}: {{ taskProgress.current }}/{{ taskProgress.total }} · {{ t("progressSucceeded") }} {{ taskProgress.filesSucceeded ?? 0 }} · {{ t("progressFailedCount") }} {{ taskProgress.filesFailed ?? 0 }}</small><small v-if="taskProgress?.unitTotal">{{ unitKindLabel(taskProgress.unitKind) }}: {{ taskProgress.unitCurrent }}/{{ taskProgress.unitTotal }} {{ taskProgress.unitLabel }}</small><small v-if="displayProgressMessage">{{ displayProgressMessage }}</small></div>
+      </article>
+      <article class="card result-panel">
+        <div class="section-heading"><span>03</span><div><h2>{{ t("detectResult") }}</h2><p>{{ t("detectResultDesc") }}</p></div></div>
+        <div v-if="decodeResult" class="result-card success decode-results">
+          <p class="result-count">{{ busy && activeTaskId === taskProgress?.taskId ? t("decodeStreamingCount", { count: decodeResult.items.length, total: decodeInputs.length }) : t("decodeResultCount", { count: decodeResult.items.length }) }}</p>
+          <article v-for="(item, index) in decodeResult.items" :key="`${item.inputPath}-${index}`" :class="['decode-item', { failed: !item.succeeded }]">
+            <div class="decode-title"><strong>{{ index + 1 }}. {{ basename(item.inputPath) }}</strong><span v-if="item.succeeded" :class="['integrity', item.integrity]">{{ integrityLabel(item.integrity) }}</span><span v-else class="integrity failed">{{ t("decodeFailed") }}</span></div>
+            <p v-if="item.succeeded" class="watermark-output">{{ item.text }}</p>
+            <p v-else class="decode-error">{{ item.error }}</p>
+            <small class="path-line">{{ item.inputPath }}</small>
+            <small v-if="item.succeeded && item.mediaType === 'image'">{{ t("fingerprintDistance") }} {{ item.fingerprintDistance ?? "-" }} · {{ t("correctedCodewords") }} {{ item.correctedCodewords }}</small>
+            <small v-else-if="item.succeeded">{{ t("validFrames") }} {{ item.validFrames ?? 0 }}/{{ item.frameCount ?? 0 }} · {{ t("expectedFrames") }} {{ item.expectedFrameCount ?? "-" }} · {{ t("modifiedFrames") }} {{ item.modifiedFrames ?? 0 }} · {{ t("missingFrames") }} {{ item.missingFrames ?? 0 }} · {{ t("insertedFrames") }} {{ item.insertedFrames ?? 0 }} · {{ t("deletedFrames") }} {{ item.deletedFrames ?? 0 }} · {{ t("replacedFrames") }} {{ item.replacedFrames ?? 0 }} · {{ t("duplicateFrames") }} {{ item.duplicateFrames ?? 0 }} · {{ t("outOfOrderFrames") }} {{ item.outOfOrderFrames ?? 0 }} · {{ t("unreadableFrames") }} {{ item.unreadableFrames ?? 0 }} · {{ t("transformedFrames") }} {{ item.transformedFrames ?? 0 }}</small>
+            <small v-if="item.succeeded && item.timelineAnomalies?.length" class="timeline-summary">{{ t("timelineAnomalies") }}: {{ timelineAnomalySummary(item.timelineAnomalies) }}</small>
+            <small v-if="item.succeeded && item.syncRegistration">{{ t("syncRegistration") }} {{ item.syncRegistration.rotationDegrees.toFixed(2) }}° / ×{{ item.syncRegistration.scale.toFixed(3) }} / Δ{{ item.syncRegistration.translationX }},{{ item.syncRegistration.translationY }} / {{ item.syncRegistration.score.toFixed(2) }}</small>
+            <small v-if="item.succeeded && item.tamperRegions.length">{{ t("tamperRegions") }} {{ item.tamperRegions.length }}</small>
+          </article>
+        </div>
+        <p v-else class="empty-state">{{ t("waitingDecode") }}</p>
+      </article>
     </section>
 
     <section v-else-if="activeTab === 'scan'" class="panel panel-grid scan-grid">
-      <article class="card action-card"><div class="section-heading"><span>01</span><div><h2>{{ t("importUnknown") }}</h2><p>{{ t("importUnknownDesc") }}</p></div></div><button class="file-picker tall" @click="chooseScanInputs"><strong>{{ t("chooseUnknown") }}</strong><span>{{ scanInputs.length ? t("selectedFiles", { count: scanInputs.length }) : t("unknownHint") }}</span></button><div v-if="scanInputs.length" class="import-summary"><div class="import-summary-head"><small>{{ t("currentImport") }}</small><button type="button" :disabled="busy" @click="clearScanInputs">{{ t("clearImportedFiles") }}</button></div><div class="file-list inline-list"><span v-for="name in previewNames(scanInputs)" :key="name">{{ name }}</span><span v-if="restCount(scanInputs)">+{{ restCount(scanInputs) }}</span></div></div><div class="task-actions"><button class="primary" :disabled="!canScan || busy" @click="runScan">{{ busy ? t("scanning") : t("scanWatermark") }}</button><button v-if="showProgress('scan') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div><div v-if="showProgress('scan')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ progressPhaseLabel(taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}: {{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressCounter") }}: {{ taskProgress.current }}/{{ taskProgress.total }}</small><small v-if="displayProgressMessage">{{ displayProgressMessage }}</small></div><p class="hint-text">{{ t("scanHint") }}</p></article>
+      <article class="card action-card"><div class="section-heading"><span>01</span><div><h2>{{ t("importUnknown") }}</h2><p>{{ t("importUnknownDesc") }}</p></div></div><button :class="['file-picker tall', { 'drag-active': activeDropTarget === 'scan-inputs' }]" type="button" data-drop-target="scan-inputs" :disabled="busy" @click="chooseScanInputs"><strong>{{ t("chooseUnknown") }}</strong><span>{{ activeDropTarget === "scan-inputs" ? t("dropRelease") : pickerHint(scanInputs, "unknownHint") }}</span></button><div v-if="scanInputs.length" class="import-summary"><div class="import-summary-head"><small>{{ t("currentImport") }}</small><button type="button" :disabled="busy" @click="clearScanInputs">{{ t("clearImportedFiles") }}</button></div><div class="file-list inline-list"><span v-for="name in previewNames(scanInputs)" :key="name">{{ name }}</span><span v-if="restCount(scanInputs)">+{{ restCount(scanInputs) }}</span></div></div><div class="task-actions"><button class="primary" :disabled="!canScan || busy" @click="runScan">{{ busy ? t("scanning") : t("scanWatermark") }}</button><button v-if="showProgress('scan') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div><div v-if="showProgress('scan')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ outcomeLabel(taskProgress?.outcome, taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}: {{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressFiles") }}: {{ taskProgress.current }}/{{ taskProgress.total }} · {{ t("progressSucceeded") }} {{ taskProgress.filesSucceeded ?? 0 }} · {{ t("progressFailedCount") }} {{ taskProgress.filesFailed ?? 0 }}</small><small v-if="taskProgress?.unitTotal">{{ unitKindLabel(taskProgress.unitKind) }}: {{ taskProgress.unitCurrent }}/{{ taskProgress.unitTotal }} {{ taskProgress.unitLabel }}</small><small v-if="displayProgressMessage">{{ displayProgressMessage }}</small></div><p class="hint-text">{{ t("scanHint") }}</p></article>
       <article class="card result-panel wide-result"><div class="section-heading"><span>02</span><div><h2>{{ t("scanFeedback") }}</h2><p>{{ t("scanFeedbackDesc") }}</p></div></div><div v-if="scanResult" class="scan-results"><article v-for="item in scanResult.items" :key="item.inputPath" class="scan-item"><div class="decode-title"><strong>{{ basename(item.inputPath) }}</strong><span :class="['scan-status', item.status]">{{ item.status === "detected" ? t("foundTrace") : t("notDetected") }}</span></div><p class="scan-summary">{{ item.summary }}</p><small v-if="item.width && item.height">{{ t("imageSize") }} {{ item.width }}×{{ item.height }}</small><div v-if="item.detections.length" class="detection-list"><article v-for="detection in item.detections" :key="`${detection.detector}-${detection.label}`"><div><strong>{{ detection.label }}</strong><span>{{ detection.confidence }} · {{ detectionAccessLabel(detection) }}</span></div><p>{{ detection.content }}</p></article></div></article></div><p v-else class="empty-state">{{ t("waitingScan") }}</p></article>
     </section>
 

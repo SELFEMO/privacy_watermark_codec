@@ -1,5 +1,6 @@
 mod cancellation;
 mod commands;
+mod drop_paths;
 mod evidence;
 mod ffmpeg;
 mod launch;
@@ -86,6 +87,8 @@ pub fn run() {
             commands::decode_media,
             commands::scan_privacy_watermark,
             commands::cancel_task,
+            commands::verify_evidence_manifest_cmd,
+            drop_paths::resolve_drop_paths,
             ffmpeg::get_ffmpeg_info,
             launch::get_launch_context,
             release::get_release_metadata

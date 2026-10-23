@@ -10,3 +10,7 @@ docs/
 
 directory_structure.txt
 release/
+.tauri/
+
+# Local algorithm design notes are intentionally excluded from the public repository.
+ALGORITHM_UPGRADE.md

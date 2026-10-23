@@ -360,7 +360,7 @@ fn encode_media_blocking(
             Ok(item) => {
                 files_succeeded += 1;
                 items.push(item);
-                emit_file_progress(
+                emit_file_progress_with_counts(
                     &app,
                     task_id.clone(),
                     TaskProgressKind::Encode,
@@ -370,13 +370,15 @@ fn encode_media_blocking(
                     total_files,
                     1.0,
                     &input,
+                    files_succeeded,
+                    files_failed,
                 );
             }
             Err(error) => {
                 error!(input = %input.display(), %error, "文件编码失败，已继续处理后续文件");
                 files_failed += 1;
                 items.push(failed_encode_item(&input, media_type, error));
-                emit_file_progress(
+                emit_file_progress_with_counts(
                     &app,
                     task_id.clone(),
                     TaskProgressKind::Encode,
@@ -386,6 +388,8 @@ fn encode_media_blocking(
                     total_files,
                     1.0,
                     &input,
+                    files_succeeded,
+                    files_failed,
                 );
             }
         }
@@ -407,7 +411,7 @@ fn encode_media_blocking(
         output_root_guard.disarm();
     }
 
-    emit_progress(
+    emit_progress_detailed(
         &app,
         task_id,
         TaskProgressKind::Encode,
@@ -421,10 +425,24 @@ fn encode_media_blocking(
         } else {
             "批量编码任务完成"
         },
-        total_files,
-        total_files,
-        100.0,
-        None,
+        ProgressDetail {
+            current: total_files,
+            total: total_files,
+            percent: 100.0,
+            current_path: None,
+            outcome: if files_failed > 0 {
+                TaskOutcome::CompletedWithErrors
+            } else {
+                TaskOutcome::Completed
+            },
+            file_fraction: Some(1.0),
+            files_succeeded: Some(files_succeeded),
+            files_failed: Some(files_failed),
+            unit_kind: Some(ProgressUnitKind::File),
+            unit_current: None,
+            unit_total: None,
+            unit_label: None,
+        },
     );
     info!(completed = files_succeeded, failed = files_failed, "批量编码任务结束");
     Ok(EncodeResponse {
@@ -628,6 +646,8 @@ fn decode_media_blocking(
                         let is_verify = search.stage == "verify";
                         let stage_label = match search.stage {
                             "identity" => "原始方向快速检测",
+                            "horizontal-flip" => "水平镜像检测",
+                            "center-zoom" => "中心放大裁切检测",
                             "resize-priority" => "常见缩放快速检测",
                             "rotation-padding-hint" => "白边角度预估",
                             "rotation-padding-forced" => "白边提示强制验证",
@@ -1006,6 +1026,37 @@ fn emit_file_progress(
     event.unit_kind = Some(ProgressUnitKind::File);
     // 批处理进度按“文件序号 + 当前文件内部阶段”折算，图片和视频都能共享同一条进度条。
     // Batch progress is normalized as file index plus per-file stage so images and videos can share one progress bar.
+    emit_task_progress(app, event);
+}
+
+fn emit_file_progress_with_counts(
+    app: &tauri::AppHandle,
+    task_id: Option<String>,
+    task: TaskProgressKind,
+    phase: &str,
+    message: impl Into<String>,
+    file_index: usize,
+    file_total: usize,
+    file_fraction: f64,
+    path: &Path,
+    files_succeeded: usize,
+    files_failed: usize,
+) {
+    let total = file_total.max(1);
+    let mut event = TaskProgressEvent::running(
+        task_id,
+        task,
+        phase,
+        message,
+        (file_index + 1).min(total),
+        total,
+        batch_percent(file_index, file_total, file_fraction),
+        Some(path.display().to_string()),
+    );
+    event.file_fraction = Some(file_fraction.clamp(0.0, 1.0));
+    event.files_succeeded = Some(files_succeeded);
+    event.files_failed = Some(files_failed);
+    event.unit_kind = Some(ProgressUnitKind::File);
     emit_task_progress(app, event);
 }
 

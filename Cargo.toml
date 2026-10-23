@@ -1,3 +1,16 @@
 [workspace]
 members = ["crates/watermark-core", "src-tauri"]
 resolver = "2"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."watermark-core"]
+# 开发模式也优化几何重采样与频域循环，是为了避免大图旋转恢复在未优化构建中表现为长时间无响应。
+# Geometry resampling and frequency-domain loops are optimized in development builds so large-image rotation recovery does not appear frozen.
+opt-level = 3
+
+[profile.dev.package.image]
+# 图像解码与像素访问同样是几何搜索的热点，单独优化依赖可保留 Tauri 其余代码的快速增量编译。
+# Image decoding and pixel access are also geometry-search hot paths; optimizing only this dependency preserves fast incremental builds for the rest of Tauri.
+opt-level = 3

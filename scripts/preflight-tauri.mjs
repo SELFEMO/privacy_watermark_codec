@@ -1,6 +1,17 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { applyRustToolchainToProcessEnv, assertCargoRunnable } from "./rust-env.mjs";
+
+try {
+  // Cursor/部分 Windows 终端拿不到 rustup 的用户 PATH；这里补上后再检查，避免 Tauri 报 cargo metadata program not found。
+  // Some Cursor/Windows terminals omit rustup's user PATH; restoring it here turns Tauri's cargo metadata "program not found" into a clear check.
+  applyRustToolchainToProcessEnv();
+  console.log(`[dev] ${assertCargoRunnable()}`);
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
+}
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const requiredFiles = [

@@ -1,0 +1,13 @@
+{
+  "plugins": {
+    "huggingface-skills": {
+      "enabled": true
+    },
+    "parallel": {
+      "enabled": true
+    },
+    "superpowers": {
+      "enabled": true
+    }
+  }
+}

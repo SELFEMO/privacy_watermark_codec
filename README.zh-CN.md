@@ -16,10 +16,13 @@
 - 支持图片和视频水印解码。
 - 支持独立密钥、批次共享密钥、自定义密码三种密钥模式。
 - 使用 PBKDF2-HMAC-SHA256 派生密钥，使用 ChaCha20-Poly1305 加密载荷。
-- 使用 DCT 频域嵌入、BCH 纠错、同步模板辅助配准和空间重复投票提高恢复鲁棒性。
+- 新编码媒体采用三级 Haar 金字塔 DWT-QIM 配置，在最粗尺度的方向细节系数中承载水印，同时保留旧版一级高频配置的历史文件读取，并结合绝对坐标均衡路由、BCH 错误/擦除恢复、几何配准和加密视频时间轴身份，增强对遮挡、裁剪、变换与帧序列攻击的抵抗能力。
+- 视频解码使用 O(n log n) 时间轴序列对齐，分别统计插入、删除、替换、重复与错序帧，并输出实际/原始帧区间。
+- 图片几何恢复会实时显示进度，并通过公开头软相关与粗到细连续搜索覆盖 ±20° 内的小数角旋转、0.25×–4× 高精度分辨率恢复以及旋转/缩放组合。
 - 使用感知指纹报告全局篡改状态和疑似篡改区域。
 - 支持未知图片扫描项目水印头，以及常见隐私/AI 元数据痕迹。
 - 支持中英文界面。
+- 所有“选择…”区域同时支持点击和原生拖放；媒体区域可拖入文件夹并递归追加受支持文件，输出目录与密钥区域会按类型校验。
 - Windows 安装后提供分组图片右键菜单。
 
 ## 项目结构
@@ -35,8 +38,13 @@ privacy-watermark-codec/
 ├─ src-tauri/windows/           NSIS 安装钩子
 ├─ crates/watermark-core/       Rust 水印、加密、密钥、扫描与篡改检测核心
 ├─ scripts/                     开发、发布、FFmpeg、AppImage 辅助脚本
+├─ docs/                        无依赖的中英文 GitHub Pages 站点
 └─ .github/workflows/           发布工作流
 ```
+
+## GitHub Pages
+
+静态产品网页位于 `docs/`。在 GitHub Pages 中选择 **Deploy from a branch**、默认分支和 `/docs` 目录即可直接发布。网页无外部构建依赖，支持中英文与明暗主题，并会读取 GitHub 的公开 Release 资产；接口不可用时仍保留静态发布页入口。
 
 ## 环境准备
 
@@ -123,6 +131,26 @@ chmod +x src-tauri/vendor/ffmpeg/macos_x64/ffmpeg src-tauri/vendor/ffmpeg/macos_
 chmod +x src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg src-tauri/vendor/ffmpeg/macos_arm64/ffprobe
 ```
 
+## 构建缓存清理
+
+手动清理全部可再生构建产物和缓存：
+
+```Shell
+npm run clean
+```
+
+也可以只清理指定范围：
+
+```Shell
+npm run clean:frontend
+npm run clean:rust
+npm run clean:release
+```
+
+默认清理范围包括前端 `dist`/Vite 缓存、Cargo `target` 目录、Tauri 临时目录以及 `release` 安装包目录。清理过程不会删除 `node_modules`，也不会删除 `src-tauri/vendor/ffmpeg` 中的内置媒体工具。
+
+`npm run dev`、`npm run build`、`npm run desktop:dev`、`npm run desktop:build`、`npm run tauri:dev`、所有 `desktop:build:*`/`tauri:build:*` 命令以及直接执行的 `npm run tauri -- dev/build` 都会在编译前自动清理。直接运行 `cargo build` 或 `cargo test` 不经过 npm 生命周期，需要先手动执行 `npm run clean`；GitHub Actions 工作流已显式加入该步骤。
+
 ## 开发运行
 
 安装前端依赖：
@@ -134,8 +162,12 @@ npm install
 启动桌面开发模式：
 
 ```Shell
-npm run tauri:dev
+npm run desktop:dev
 ```
+
+`npm run desktop:dev` 是推荐的桌面开发入口；为兼容已有脚本，`npm run tauri:dev` 仍提供完全相同的行为。两个命令都会先执行全量清理，再完成环境预检、FFmpeg 清单生成并启动 Tauri。
+
+桌面启动器默认优先使用 `127.0.0.1:1420`。如果该端口已被其他程序占用，或落入 Windows/Hyper-V 的系统保留端口范围，启动器会先探测可绑定端口，再通过 Tauri 的运行时配置把同一个地址同步给 Vite 与 WebView。终端会输出实际使用的开发地址，因此无需手动修改 `vite.config.ts` 或 `tauri.conf.json`。单独执行 `npm run dev` 时，Vite 也允许自动选择其他可用端口。
 
 Linux 开发模式会在 Tauri 窗口启动前临时写入用户级 `.desktop` 文件和 hicolor 图标，让 GNOME/Ubuntu Dock 能把调试窗口匹配到真实应用图标。正常退出时，包装脚本会删除这些临时文件。
 
@@ -153,8 +185,10 @@ npm run linux:desktop:cleanup
 构建当前平台默认包：
 
 ```Shell
-npm run tauri:build
+npm run desktop:build
 ```
+
+`npm run desktop:build` 与 `npm run tauri:build` 等价。也可以使用 `desktop:build:windows`、`desktop:build:macos` 或 `desktop:build:linux` 作为对应平台的简化入口。
 
 ### Windows
 
@@ -302,8 +336,8 @@ Linux DEB/RPM 通常安装到普通用户不可写的系统路径。此时软件
 ### 编码
 
 1. 进入编码模式。
-2. 选择图片或视频文件。
-3. 选择输出目录。
+2. 点击选择图片/视频，或把文件、多个文件、文件夹直接拖到媒体选择区域；文件夹会递归筛选受支持媒体。
+3. 点击选择输出目录，或把目标文件夹拖到输出目录区域。
 4. 输入水印文本。
 5. 选择独立密钥、批次共享密钥或自定义密码。
 6. 开始编码。
@@ -312,14 +346,14 @@ Linux DEB/RPM 通常安装到普通用户不可写的系统路径。此时软件
 ### 解码
 
 1. 进入解码模式。
-2. 选择已编码的图片或视频。
-3. 选择 `.key` 文件，或输入原始自定义密码。
+2. 点击选择已编码媒体，或把文件/文件夹拖到媒体区域继续追加。
+3. 点击选择或拖入 `.key`/JSON 密钥文件，也可以输入原始自定义密码。
 4. 开始解码与检测。
 5. 查看提取文本、篡改状态和疑似篡改区域。
 
 ### 扫描
 
-1. 选择未知图片，或从 Windows 右键菜单导入。
+1. 点击选择未知图片、拖入图片/文件夹，或从 Windows 右键菜单导入。
 2. 开始扫描。
 3. 查看是否发现项目水印头、隐私元数据或 AI 水印痕迹。
 

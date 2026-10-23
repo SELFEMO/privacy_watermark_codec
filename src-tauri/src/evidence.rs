@@ -77,6 +77,43 @@ pub fn write_evidence_manifest(
     fs::write(path, content)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceVerifyResult {
+    pub status: String,
+}
+
+pub fn verify_evidence_manifest(
+    path: &Path,
+    key: &WatermarkKey,
+) -> io::Result<EvidenceVerifyResult> {
+    let content = fs::read_to_string(path)?;
+    let manifest: EvidenceManifest =
+        serde_json::from_str(&content).map_err(json_error)?;
+    let observed_signature = manifest.manifest_signature.clone();
+    let unsigned = UnsignedEvidenceManifest {
+        generated_at: manifest.generated_at,
+        hash_algorithm: manifest.hash_algorithm,
+        signature_algorithm: manifest.signature_algorithm,
+        release: manifest.release,
+        entries: manifest.entries,
+    };
+    let unsigned_json = serde_json::to_vec(&unsigned).map_err(json_error)?;
+    let mut material = unsigned_json;
+    material.extend_from_slice(&key.derived_key);
+    let expected = hex_sha256(&material);
+    let status = if expected == observed_signature {
+        "ok"
+    } else {
+        "mismatch"
+    };
+    // 核验只返回 ok/mismatch，不回传密钥或清单签名材料，避免把持钥校验码变成密钥泄漏通道。
+    // Verification returns only ok/mismatch and never echoes the key or signature material, so the check cannot become a key leak.
+    Ok(EvidenceVerifyResult {
+        status: status.into(),
+    })
+}
+
 fn hex_sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut output = String::with_capacity(digest.len() * 2);

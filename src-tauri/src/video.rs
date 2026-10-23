@@ -35,6 +35,13 @@ pub fn effective_video_strength(ui: f32) -> f32 {
     ui.clamp(3.0, 20.0)
 }
 
+pub(crate) fn video_frame_failure_aborts_clip(failed_frames: usize, total_frames: usize) -> bool {
+    // 只按整段失败率中止；连续暗场贴线帧不应在失败率仍低于 10% 时毁掉整段。
+    // Abort only on clip-wide failure rate; a streak of dark near-miss frames must not kill the clip while the rate is still under 10%.
+    let total = total_frames.max(1) as f64;
+    (failed_frames as f64 / total) > 0.10
+}
+
 pub(crate) fn ffmpeg_input_arg(path: &Path) -> OsString {
     let file_name = path.file_name().unwrap_or_default();
     if !file_name.to_string_lossy().starts_with('-') {
@@ -274,8 +281,8 @@ pub fn encode_video(
                     let options = EmbedOptions {
                         text,
                         key,
-                        // 视频强度只按用户滑条钳到 3–20，不再偷偷抬到 16；PSNR 不足时由核心逐级降到 6。
-                        // Video strength follows the UI slider clamped to 3–20 and is no longer silently raised to 16; the core backs off to 6 when PSNR is too low.
+                        // 视频强度只按用户滑条钳到 3–20，不再偷偷抬到 16；PSNR 不足时由核心逐级降到 4。
+                        // Video strength follows the UI slider clamped to 3–20 and is no longer silently raised to 16; the core backs off to 4 when PSNR is too low.
                         strength: video_strength,
                         media_kind: "video_frame".into(),
                         temporal: Some(TemporalContext {
@@ -312,8 +319,7 @@ pub fn encode_video(
                 Err(error) => {
                     failed_frames += 1;
                     consecutive_failures += 1;
-                    let fail_rate = failed_frames as f64 / frames.len() as f64;
-                    if fail_rate > 0.10 || consecutive_failures >= 8 {
+                    if video_frame_failure_aborts_clip(failed_frames, frames.len()) {
                         return Err(format!(
                             "视频逐帧嵌入失败过多（失败 {failed_frames}/{}，连续 {consecutive_failures}）。{error}",
                             frames.len()
@@ -1612,6 +1618,14 @@ mod encode_guard_tests {
         assert!((effective_video_strength(8.0) - 8.0).abs() < f32::EPSILON);
         assert!((effective_video_strength(1.0) - 3.0).abs() < f32::EPSILON);
         assert!((effective_video_strength(32.0) - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn consecutive_frame_streak_does_not_abort_when_rate_is_under_ten_percent() {
+        assert!(!video_frame_failure_aborts_clip(8, 246));
+        assert!(!video_frame_failure_aborts_clip(21, 246));
+        assert!(video_frame_failure_aborts_clip(25, 246));
+        assert!(video_frame_failure_aborts_clip(2, 10));
     }
 
     #[test]

@@ -180,4 +180,38 @@ mod tests {
         assert!((start - 0.90).abs() < 1e-9);
         assert!((end - 0.98).abs() < 1e-9);
     }
+
+    #[test]
+    fn encode_completed_with_errors_reports_nonzero_success_and_failure_counts() {
+        // 编码收尾必须带上成功/失败计数，否则界面会把 None 显示成 0/0，和“部分文件失败”互相矛盾。
+        // Encode completion must carry success/failure counts, otherwise the UI renders None as 0/0 against a partial-failure caption.
+        let event = progress_event_detailed(
+            None,
+            TaskProgressKind::Encode,
+            "completed_with_errors",
+            "批量编码任务结束，部分文件失败",
+            ProgressDetail {
+                current: 2,
+                total: 2,
+                percent: 100.0,
+                current_path: None,
+                outcome: TaskOutcome::CompletedWithErrors,
+                file_fraction: Some(1.0),
+                files_succeeded: Some(1),
+                files_failed: Some(1),
+                unit_kind: Some(ProgressUnitKind::File),
+                unit_current: None,
+                unit_total: None,
+                unit_label: None,
+            },
+        );
+        assert_eq!(event.outcome, Some(TaskOutcome::CompletedWithErrors));
+        assert_eq!(event.files_succeeded, Some(1));
+        assert_eq!(event.files_failed, Some(1));
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["filesSucceeded"], 1);
+        assert_eq!(json["filesFailed"], 1);
+        assert_ne!(json["filesSucceeded"], 0);
+        assert_ne!(json["filesFailed"], 0);
+    }
 }

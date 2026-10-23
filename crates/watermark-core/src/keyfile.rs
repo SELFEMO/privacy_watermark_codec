@@ -8,6 +8,7 @@ use crate::{
     crypto::{derive_key, random_bytes, DEFAULT_PBKDF2_ITERATIONS, KEY_LEN, SALT_LEN},
     error::{CoreError, Result},
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -17,8 +18,9 @@ pub enum KeyMode {
     Custom,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct WatermarkKey {
+    #[zeroize(skip)]
     pub mode: KeyMode,
     pub salt: [u8; SALT_LEN],
     pub derived_key: [u8; KEY_LEN],
@@ -28,6 +30,7 @@ pub struct WatermarkKey {
 #[derive(Debug, Clone)]
 pub enum KeySource {
     KeyFile(KeyFile),
+    KeyFiles(Vec<KeyFile>),
     CustomPassword(String),
 }
 
@@ -56,8 +59,10 @@ impl WatermarkKey {
     }
 
     pub fn from_password(password: &str, salt: Option<[u8; SALT_LEN]>) -> Result<Self> {
-        if password.is_empty() {
-            return Err(CoreError::InvalidArgument("自定义密码不能为空".into()));
+        if password.chars().count() < 12 {
+            return Err(CoreError::InvalidArgument(
+                "自定义密码至少需要 12 个字符".into(),
+            ));
         }
         let salt = salt.unwrap_or_else(random_bytes::<SALT_LEN>);
         let derived_key = derive_key(password.as_bytes(), &salt, DEFAULT_PBKDF2_ITERATIONS);
@@ -92,8 +97,10 @@ impl KeyFile {
     }
 
     pub fn write(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
         let content = serde_json::to_string_pretty(self)?;
         fs::write(path, content)?;
+        restrict_key_file_acl(path);
         Ok(())
     }
 
@@ -138,5 +145,68 @@ impl KeyFile {
             derived_key,
             iterations: self.iterations,
         })
+    }
+}
+
+fn restrict_key_file_acl(path: &Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let Ok(user) = std::env::var("USERNAME") else {
+            return;
+        };
+        // 密钥文件只留给当前用户读取；icacls 失败时保留默认 ACL，避免写盘成功后因权限命令失败而删掉文件。
+        // Key files are limited to the current user for reading; if icacls fails the default ACL is kept so a successful write is not undone.
+        // CREATE_NO_WINDOW 避免编码完成写密钥时弹出命令行窗口一闪而过。
+        // CREATE_NO_WINDOW prevents a console window from flashing when the key is written after a successful encode.
+        let _ = std::process::Command::new("icacls")
+            .arg(path)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{user}:(R)"))
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = path;
+}
+
+impl std::fmt::Debug for WatermarkKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WatermarkKey")
+            .field("mode", &self.mode)
+            .field("iterations", &self.iterations)
+            .field("derived_key", &"[redacted]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_password_requires_twelve_unicode_scalars() {
+        assert!(WatermarkKey::from_password("elevenchars", None).is_err());
+        assert!(WatermarkKey::from_password("twelvechars!", None).is_ok());
+        assert!(WatermarkKey::from_password("十二个汉字密码测试通过了", None).is_ok());
+    }
+
+    #[test]
+    fn write_keeps_the_key_file_after_acl_restriction() {
+        let dir = std::env::temp_dir().join(format!("pwc-keyfile-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.key");
+        WatermarkKey::random(KeyMode::Independent)
+            .to_key_file()
+            .write(&path)
+            .unwrap();
+        assert!(path.is_file());
+        let loaded = KeyFile::read(&path).unwrap();
+        assert_eq!(loaded.mode, KeyMode::Independent);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
     }
 }

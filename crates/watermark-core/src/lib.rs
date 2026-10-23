@@ -1,6 +1,7 @@
 pub mod bch;
 pub mod crypto;
 pub mod dct;
+pub mod dwt_qim;
 pub mod error;
 pub mod fingerprint;
 pub mod keyfile;
@@ -15,5 +16,5 @@ pub use keyfile::{KeyFile, KeyMode, KeySource, WatermarkKey};
 pub use scan::{scan_image_file, PrivacyScanDetection, PrivacyScanReport, PrivacyScanStatus};
 pub use sync::SyncRegistration;
 pub use watermark::{
-    embed_image_file, embed_image_file_with_auto_strength, extract_image_file, extract_image_file_with_options, EmbedOptions, EmbedReport, ExtractOptions, ExtractReport, IntegrityStatus, PublicWatermarkHeader,
+    embed_image_file, embed_image_file_with_auto_strength, extract_image_file, extract_image_file_with_options, extract_image_file_with_progress, EmbedOptions, EmbedReport, ExtractOptions, ExtractReport, GeometrySearchProgress, IntegrityStatus, PublicWatermarkHeader, TemporalContext,
 };

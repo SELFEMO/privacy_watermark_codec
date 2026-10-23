@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use serde::{Deserialize, Serialize};
 
@@ -74,8 +76,13 @@ pub fn compare_partitions(
     original: &[PartitionFingerprint],
     current: &[PartitionFingerprint],
 ) -> Vec<TamperRegion> {
+    let current_by_index: HashMap<usize, &PartitionFingerprint> =
+        current.iter().map(|region| (region.index, region)).collect();
     let mut regions = Vec::new();
-    for (left, right) in original.iter().zip(current.iter()) {
+    for left in original {
+        let Some(right) = current_by_index.get(&left.index).copied() else {
+            continue;
+        };
         let Ok(original_hash) = u64::from_str_radix(&left.hash_hex, 16) else {
             continue;
         };
@@ -91,8 +98,8 @@ pub fn compare_partitions(
             "intact"
         };
         if status != "intact" {
-            // 分区指纹只保存感知哈希而非原图内容，因此可用于定位疑似篡改区域，同时避免在水印载荷中泄露局部图像数据。
-            // Partition fingerprints store perceptual hashes instead of pixels, so they can localize suspicious edits without leaking local image content.
+            // 按稳定分区编号匹配而非按数组位置配对，是为了支持容量自适应抽样后仍能准确定位对应区域。
+            // Matching by stable partition index rather than array position keeps localization correct after capacity-adaptive sampling.
             regions.push(TamperRegion {
                 index: left.index,
                 x: right.x,

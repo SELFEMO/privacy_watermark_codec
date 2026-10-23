@@ -32,6 +32,10 @@ jobs:
         shell: powershell
         run: npm run ffmpeg:manifest
 
+      - name: Clean previous build outputs
+        shell: powershell
+        run: npm run clean
+
       - name: Test watermark core
         shell: powershell
         run: cargo test -p watermark-core --release

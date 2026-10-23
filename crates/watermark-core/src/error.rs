@@ -22,13 +22,19 @@ pub enum CoreError {
         available_blocks: usize,
     },
 
-    #[error("图像过小，至少需要 256×256 像素")]
+    #[error("图像尺寸不足；编码至少需要 256×256 像素，受攻击媒体解码至少需保留 128×128 像素")]
     ImageTooSmall,
 
-    #[error("未检测到有效水印头；图片可能没有使用本软件编码，或已发生严重裁剪/压缩")]
+    #[error("图像像素数超过 64,000,000 上限，请缩小后再处理")]
+    ImageTooLarge,
+
+    #[error("扫描文件超过 80,000,000 字节上限")]
+    ScanFileTooLarge,
+
+    #[error("未检测到有效水印头；图片可能没有使用本软件编码，或旋转后铺满裁切/严重压缩破坏了块周期。无白边的小角度旋转铺满裁切可能对不齐网格；旧一级高频在旋转插值后也可能无法恢复")]
     HeaderNotFound,
 
-    #[error("水印数据校验失败；内容可能被严重修改，或解码凭据不正确")]
+    #[error("已识别到水印结构，但正文无法通过纠错与认证；图片可能被过度遮挡、压缩或修改")]
     PayloadCorrupted,
 
     #[error("密钥文件与媒体中的水印盐值不匹配")]
@@ -46,8 +52,23 @@ pub enum CoreError {
     #[error("序列化失败：{0}")]
     Serialization(#[from] serde_json::Error),
 
+    #[error("任务已取消")]
+    Cancelled,
+
     #[error("I/O 操作失败：{0}")]
     Io(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
+
+#[cfg(test)]
+mod tests {
+    use super::CoreError;
+
+    #[test]
+    fn header_not_found_mentions_fill_crop_and_legacy_rotation() {
+        let message = CoreError::HeaderNotFound.to_string();
+        assert!(message.contains("铺满裁切"));
+        assert!(message.contains("一级高频"));
+    }
+}

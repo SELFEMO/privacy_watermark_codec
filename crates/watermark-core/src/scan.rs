@@ -10,6 +10,7 @@ use crate::{
 
 const MAX_METADATA_SNIPPETS: usize = 8;
 const SNIPPET_RADIUS: usize = 220;
+pub(crate) const MAX_SCAN_FILE_BYTES: u64 = 80_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +67,10 @@ const MARKERS: &[Marker] = &[
 
 pub fn scan_image_file(input_path: impl AsRef<Path>) -> Result<PrivacyScanReport> {
     let input_path = input_path.as_ref();
+    let metadata = fs::metadata(input_path)?;
+    if exceeds_max_scan_file_bytes(metadata.len()) {
+        return Err(CoreError::ScanFileTooLarge);
+    }
     let bytes = fs::read(input_path)?;
     let image = image::open(input_path).map_err(|source| CoreError::ImageOpen {
         path: input_path.to_path_buf(),
@@ -77,14 +82,17 @@ pub fn scan_image_file(input_path: impl AsRef<Path>) -> Result<PrivacyScanReport
         // 这里仅公开水印头中的非敏感字段，因为本项目的正文载荷经过 ChaCha20-Poly1305 加密，不能也不应绕过密钥直接读取。
         // Only non-sensitive header fields are exposed here because this project's body payload is encrypted with ChaCha20-Poly1305 and must not be bypassed without the key.
         detections.push(PrivacyScanDetection {
-            detector: "pww_dct_header".into(),
+            detector: "pww_frequency_header".into(),
             label: "本软件加密频域隐私水印".into(),
             content: format!(
-                "检测到有效 PWW1 水印头；salt={}，payload={} bytes，route_step={}，strength≈{:.1}。具体水印文本已加密，需要 .key 文件或自定义密码解码。",
+                "检测到有效频域水印头；algorithm={}，salt={}，payload={} bytes，route_step={}，strength≈{:.1}，original={}×{}。具体水印文本已加密，需要 .key 文件或自定义密码解码。",
+                header.algorithm,
                 header.salt_hex,
                 header.body_len,
                 header.route_step,
-                header.strength
+                header.strength,
+                header.original_width.map(|value| value.to_string()).unwrap_or_else(|| "unknown".into()),
+                header.original_height.map(|value| value.to_string()).unwrap_or_else(|| "unknown".into())
             ),
             confidence: "high".into(),
             needs_key: true,
@@ -220,4 +228,19 @@ fn sanitize_snippet(bytes: &[u8], index: usize, keyword_len: usize) -> String {
     let trimmed = compact.trim_matches(|ch: char| !ch.is_alphanumeric() && !ch.is_ascii_punctuation() && !ch.is_whitespace());
     debug!(chars = trimmed.chars().count(), "提取到疑似水印元数据上下文");
     trimmed.chars().take(520).collect()
+}
+
+pub(crate) fn exceeds_max_scan_file_bytes(len: u64) -> bool {
+    len > MAX_SCAN_FILE_BYTES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_byte_limit_rejects_over_80mb() {
+        assert!(!exceeds_max_scan_file_bytes(80_000_000));
+        assert!(exceeds_max_scan_file_bytes(80_000_001));
+    }
 }

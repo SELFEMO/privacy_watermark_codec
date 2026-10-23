@@ -30,6 +30,20 @@ macOS / Linux：
 cd ~/Learning/Rust/privacy_watermark_codec
 ```
 
+## 不上传本地算法设计文档
+
+`ALGORITHM_UPGRADE.md` 已加入 `.gitignore`，新项目执行 `git add .` 时不会上传该文件。完整算法实现仍保留在源码和测试中，不依赖该文档参与编译或运行。
+
+如果旧仓库已经跟踪过此文件，仅添加 `.gitignore` 不会自动停止跟踪，需要执行一次：
+
+```text
+git rm --cached ALGORITHM_UPGRADE.md
+git commit -m "Stop tracking local algorithm notes"
+git push origin main
+```
+
+该命令只从 Git 索引和后续提交中移除文件；本地文件可继续保留。当前项目归档已直接移除该文档。
+
 ## 首次上传到 GitHub
 
 ```text

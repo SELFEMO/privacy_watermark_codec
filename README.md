@@ -16,10 +16,13 @@ This project was implemented with AI-assisted programming. Before public release
 - Decodes watermarked images and videos.
 - Supports independent keys, one shared batch key, and custom-password mode.
 - Uses PBKDF2-HMAC-SHA256 for key derivation and ChaCha20-Poly1305 for encrypted payloads.
-- Uses DCT-domain embedding, BCH error correction, synchronization-assisted registration, and repeated voting to improve recovery robustness.
+- Uses a three-level Haar-pyramid DWT-QIM profile with coarse-scale directional detail coefficients for newly encoded media, retains the legacy one-level high-frequency profile for historical files, and combines balanced absolute-coordinate routing, BCH error/erasure recovery, geometric registration, and encrypted video timeline identities to resist occlusion, crop, transform, and frame-sequence attacks.
+- Uses O(n log n) timeline sequence alignment during video decoding to report inserted, deleted, replaced, duplicated, and out-of-order frames with actual/original frame ranges.
+- Shows live geometry-recovery progress and uses soft public-header correlation with coarse-to-fine continuous searches for fractional rotations through ±20°, high-precision 0.25×–4× resize correction, and ranked rotation/scale combinations.
 - Reports global tamper status and suspicious regions from perceptual fingerprints.
 - Scans unknown images for this project watermark header and common privacy or AI metadata traces.
 - Provides Chinese and English UI text.
+- Every “Choose…” area supports both clicking and native drag-and-drop; media folders are recursively filtered and appended, while output-folder and key zones validate the dropped path type.
 - Adds grouped Windows image context-menu actions when installed through the Windows installer.
 
 ## Repository layout
@@ -35,8 +38,13 @@ privacy-watermark-codec/
 ├─ src-tauri/windows/           NSIS installer hooks
 ├─ crates/watermark-core/       Rust watermark, crypto, key, scan, and tamper core
 ├─ scripts/                     Development, release, FFmpeg, and AppImage helper scripts
+├─ docs/                        Dependency-free bilingual GitHub Pages site
 └─ .github/workflows/           Release workflow
 ```
+
+## GitHub Pages
+
+The static product site lives in `docs/` and can be published directly with GitHub Pages by selecting **Deploy from a branch**, the default branch, and the `/docs` folder. The page is dependency-free, supports Chinese/English and light/dark themes, and reads public release assets from GitHub with a static releases-page fallback.
 
 ## Prerequisites
 
@@ -123,6 +131,26 @@ chmod +x src-tauri/vendor/ffmpeg/macos_x64/ffmpeg src-tauri/vendor/ffmpeg/macos_
 chmod +x src-tauri/vendor/ffmpeg/macos_arm64/ffmpeg src-tauri/vendor/ffmpeg/macos_arm64/ffprobe
 ```
 
+## Build cache cleanup
+
+Remove all disposable build outputs and caches manually:
+
+```Shell
+npm run clean
+```
+
+Use a narrower cleanup scope when needed:
+
+```Shell
+npm run clean:frontend
+npm run clean:rust
+npm run clean:release
+```
+
+The default cleanup removes frontend `dist`/Vite caches, Cargo `target` directories, Tauri temporary directories, and the `release` package directory. It preserves `node_modules` and the bundled media tools under `src-tauri/vendor/ffmpeg`.
+
+`npm run dev`, `npm run build`, `npm run desktop:dev`, `npm run desktop:build`, `npm run tauri:dev`, every `desktop:build:*`/`tauri:build:*` command, and direct `npm run tauri -- dev/build` calls clean automatically before compilation. Direct `cargo build` or `cargo test` commands do not pass through npm lifecycle hooks, so run `npm run clean` first; the GitHub Actions workflow already includes that step explicitly.
+
 ## Development
 
 Install frontend dependencies:
@@ -134,8 +162,12 @@ npm install
 Start the desktop app in development mode:
 
 ```Shell
-npm run tauri:dev
+npm run desktop:dev
 ```
+
+`npm run desktop:dev` is the recommended desktop development entry point. `npm run tauri:dev` remains available with identical behavior for compatibility. Both commands perform a full clean, run environment preflight checks, generate the FFmpeg manifest, and then start Tauri.
+
+The desktop launcher prefers `127.0.0.1:1420`. If that port is occupied or belongs to a Windows/Hyper-V excluded-port range, the launcher probes for a bindable port and uses a Tauri runtime configuration to synchronize the same address with both Vite and the WebView. The terminal prints the selected development URL, so `vite.config.ts` and `tauri.conf.json` do not need manual edits. Standalone `npm run dev` also allows Vite to choose another available port.
 
 Linux development mode temporarily writes user-level desktop entries and hicolor icons before the Tauri window starts. This helps GNOME/Ubuntu Dock match the debug window to the real app icon. The wrapper removes those temporary files on normal exit.
 
@@ -153,8 +185,10 @@ Both cleanup commands call the same script. They only remove project-managed tem
 Build the default bundle for the current platform:
 
 ```Shell
-npm run tauri:build
+npm run desktop:build
 ```
+
+`npm run desktop:build` is equivalent to `npm run tauri:build`. The `desktop:build:windows`, `desktop:build:macos`, and `desktop:build:linux` aliases are also available as simplified platform entry points.
 
 ### Windows
 
@@ -302,8 +336,8 @@ This fallback prevents installed Linux packages from exiting before the WebView 
 ### Encode
 
 1. Open encode mode.
-2. Select image or video files.
-3. Choose an output directory.
+2. Click to choose images/videos, or drop files, multiple files, or folders onto the media zone; folders are recursively filtered for supported media.
+3. Click to choose an output directory, or drop the target folder onto the output zone.
 4. Enter watermark text.
 5. Choose independent key, shared batch key, or custom password.
 6. Start encoding.
@@ -312,14 +346,14 @@ This fallback prevents installed Linux packages from exiting before the WebView 
 ### Decode
 
 1. Open decode mode.
-2. Select encoded images or videos.
-3. Select the `.key` file or enter the original custom password.
+2. Click to choose encoded media, or drop files/folders onto the media zone to append them.
+3. Click to choose or drop a `.key`/JSON key file, or enter the original custom password.
 4. Start decoding and inspection.
 5. Review extracted text, tamper status, and suspicious regions.
 
 ### Scan
 
-1. Select unknown images, or import them from the Windows right-click menu.
+1. Click to choose unknown images, drop images/folders, or import them from the Windows right-click menu.
 2. Start scan.
 3. Review whether a project watermark header, privacy metadata, or AI watermark traces are found.
 

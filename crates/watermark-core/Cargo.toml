@@ -1,9 +1,9 @@
 [package]
 name = "watermark-core"
-version = "0.1.0"
+version = "0.2.7"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Blind DCT watermarking core for Privacy Watermark Codec"
+description = "Robust DWT-QIM watermarking core for Privacy Watermark Codec"
 
 [dependencies]
 base64 = "0.22"
