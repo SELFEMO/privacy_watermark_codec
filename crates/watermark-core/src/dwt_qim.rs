@@ -5,6 +5,8 @@ use crate::sync::AffineTransform;
 const BLOCK: usize = 8;
 pub const QIM_PROFILE_LEGACY: u8 = 0;
 pub const QIM_PROFILE_PYRAMID: u8 = 1;
+pub const QIM_PROFILE_INTERLEAVED: u8 = 2;
+pub const QIM_PROFILE_SYNC: u8 = 3;
 const LEGACY_COEFF_A: (usize, usize) = (5, 1);
 const LEGACY_COEFF_B: (usize, usize) = (1, 5);
 const PYRAMID_COEFF_A: (usize, usize) = (1, 0);
@@ -30,7 +32,80 @@ pub fn read_bit_with_profile(
 ) -> BitObservation {
     // 不能仅凭块接近纯白或纯黑就把它当作旋转补边，因为正常照片、JPEG 压缩和缩放重采样都可能产生这类有效载荷块；补边应在几何层按边界连通性处理。
     // A block must not be treated as rotation padding merely because it is nearly white or black, since normal photos, JPEG compression, and resize resampling can all produce valid payload blocks of that kind; padding belongs in the geometry layer where boundary connectivity is known.
-    observe_luma_block(read_luma_block(image, block_x, block_y), step, profile)
+    read_bit_at_pixel(
+        image,
+        block_x * BLOCK as u32,
+        block_y * BLOCK as u32,
+        step,
+        profile,
+    )
+}
+
+// 直接读取任意像素起点，避免裁剪相位扫描为每个小块分配临时图像；方向系数仍按原 Haar 运算顺序计算，以保留历史判决边界。
+// Read arbitrary pixel origins directly to avoid allocating a temporary image for every crop-phase block; directional coefficients keep the original Haar operation order to preserve historical decision boundaries.
+pub(crate) fn read_bit_at_pixel(
+    image: &RgbaImage,
+    pixel_x: u32,
+    pixel_y: u32,
+    step: f32,
+    profile: u8,
+) -> BitObservation {
+    observe_difference(
+        read_difference_at_pixel(image, pixel_x, pixel_y, profile),
+        step,
+        profile,
+    )
+}
+
+pub(crate) fn read_difference_at_pixel(
+    image: &RgbaImage,
+    pixel_x: u32,
+    pixel_y: u32,
+    profile: u8,
+) -> f32 {
+    directional_difference(
+        |x, y| {
+            let pixel = image.get_pixel(pixel_x + x as u32, pixel_y + y as u32);
+            0.299 * pixel[0] as f32 + 0.587 * pixel[1] as f32 + 0.114 * pixel[2] as f32
+        },
+        profile,
+    )
+}
+
+fn directional_difference(mut sample: impl FnMut(usize, usize) -> f32, profile: u8) -> f32 {
+    let mut quadrants = [[0.0_f32; 2]; 2];
+    if profile >= QIM_PROFILE_PYRAMID {
+        for (qy, row) in quadrants.iter_mut().enumerate() {
+            for (qx, mean) in row.iter_mut().enumerate() {
+                let mut averages = [[0.0_f32; 2]; 2];
+                for (y, average_row) in averages.iter_mut().enumerate() {
+                    for (x, value) in average_row.iter_mut().enumerate() {
+                        let px = qx * 4 + x * 2;
+                        let py = qy * 4 + y * 2;
+                        let upper = (sample(px, py) + sample(px + 1, py)) * 0.5;
+                        let lower = (sample(px, py + 1) + sample(px + 1, py + 1)) * 0.5;
+                        *value = (upper + lower) * 0.5;
+                    }
+                }
+                let upper = (averages[0][0] + averages[0][1]) * 0.5;
+                let lower = (averages[1][0] + averages[1][1]) * 0.5;
+                *mean = (upper + lower) * 0.5;
+            }
+        }
+    } else {
+        for (y, row) in quadrants.iter_mut().enumerate() {
+            for (x, value) in row.iter_mut().enumerate() {
+                *value = sample(x + 2, y + 2);
+            }
+        }
+    }
+    let horizontal = ((quadrants[0][0] - quadrants[0][1]) * 0.5
+        + (quadrants[1][0] - quadrants[1][1]) * 0.5)
+        * 0.5;
+    let vertical = ((quadrants[0][0] + quadrants[0][1]) * 0.5
+        - (quadrants[1][0] + quadrants[1][1]) * 0.5)
+        * 0.5;
+    horizontal - vertical
 }
 
 pub(crate) fn read_transformed_bit(
@@ -59,13 +134,7 @@ pub(crate) fn read_transformed_bit(
     Some(observe_luma_block(block, step, profile))
 }
 
-pub fn write_bit(
-    image: &mut RgbaImage,
-    block_x: u32,
-    block_y: u32,
-    bit: bool,
-    step: f32,
-) {
+pub fn write_bit(image: &mut RgbaImage, block_x: u32, block_y: u32, bit: bool, step: f32) {
     write_bit_with_profile(image, block_x, block_y, bit, step, QIM_PROFILE_LEGACY);
 }
 
@@ -108,14 +177,14 @@ pub fn write_bit_with_profile(
     apply_luma_delta(image, block_x, block_y, &original, &modified);
 }
 
-fn observe_luma_block(
-    block: [[f32; BLOCK]; BLOCK],
-    step: f32,
-    profile: u8,
-) -> BitObservation {
-    let coeffs = forward_profile(block, profile);
-    let (coeff_a, coeff_b) = coefficient_pair(profile);
-    let difference = coeffs[coeff_a.1][coeff_a.0] - coeffs[coeff_b.1][coeff_b.0];
+fn observe_luma_block(block: [[f32; BLOCK]; BLOCK], step: f32, profile: u8) -> BitObservation {
+    let difference = directional_difference(|x, y| block[y][x], profile);
+    observe_difference(difference, step, profile)
+}
+
+// 缓存未量化的系数差后可复用不同步长的投票，避免压缩恢复在相同像素上反复执行变换。
+// Caching the unquantized coefficient difference lets step-adaptive votes reuse the same pixels without repeating transforms during compression recovery.
+pub(crate) fn observe_difference(difference: f32, step: f32, profile: u8) -> BitObservation {
     let normalized = difference / effective_step(step, profile);
     let nearest = normalized.round();
     let bit = (nearest as i32).rem_euclid(2) == 1;
@@ -124,7 +193,7 @@ fn observe_luma_block(
 }
 
 fn effective_step(step: f32, profile: u8) -> f32 {
-    if profile == QIM_PROFILE_PYRAMID {
+    if profile >= QIM_PROFILE_PYRAMID {
         // 0.58 而不是更大的乘数，是因为公开头仍用固定 HEADER_STEP、自动降强度只降正文；过大的金字塔步长会让典型照片卡在 40 dB 门槛之下无法保存。
         // 0.58 rather than a larger multiplier because the public header still uses a fixed HEADER_STEP while auto-backoff only reduces body strength; a larger pyramid step leaves typical photos below the 40 dB save gate.
         (step * PYRAMID_STEP_MULTIPLIER).max(1.0)
@@ -134,7 +203,7 @@ fn effective_step(step: f32, profile: u8) -> f32 {
 }
 
 fn coefficient_pair(profile: u8) -> ((usize, usize), (usize, usize)) {
-    if profile == QIM_PROFILE_PYRAMID {
+    if profile >= QIM_PROFILE_PYRAMID {
         // 最粗尺度的水平与垂直细节在缩放、插值和轻微旋转后仍保留稳定方向能量，因此比原一级高频载波更适合几何恢复。
         // Coarsest-scale horizontal and vertical details retain stable directional energy after resizing, interpolation, and small rotations, making them better suited to geometric recovery than the original one-level high-frequency carrier.
         (PYRAMID_COEFF_A, PYRAMID_COEFF_B)
@@ -143,22 +212,16 @@ fn coefficient_pair(profile: u8) -> ((usize, usize), (usize, usize)) {
     }
 }
 
-fn forward_profile(
-    values: [[f32; BLOCK]; BLOCK],
-    profile: u8,
-) -> [[f32; BLOCK]; BLOCK] {
-    if profile == QIM_PROFILE_PYRAMID {
+fn forward_profile(values: [[f32; BLOCK]; BLOCK], profile: u8) -> [[f32; BLOCK]; BLOCK] {
+    if profile >= QIM_PROFILE_PYRAMID {
         forward_haar_pyramid(values)
     } else {
         forward_haar_level(values)
     }
 }
 
-fn inverse_profile(
-    values: [[f32; BLOCK]; BLOCK],
-    profile: u8,
-) -> [[f32; BLOCK]; BLOCK] {
-    if profile == QIM_PROFILE_PYRAMID {
+fn inverse_profile(values: [[f32; BLOCK]; BLOCK], profile: u8) -> [[f32; BLOCK]; BLOCK] {
+    if profile >= QIM_PROFILE_PYRAMID {
         inverse_haar_pyramid(values)
     } else {
         inverse_haar_level(values)
@@ -172,9 +235,7 @@ fn read_luma_block(image: &RgbaImage, block_x: u32, block_y: u32) -> [[f32; BLOC
     for (y, row) in block.iter_mut().enumerate() {
         for (x, value) in row.iter_mut().enumerate() {
             let pixel = image.get_pixel(start_x + x as u32, start_y + y as u32);
-            *value = 0.299 * pixel[0] as f32
-                + 0.587 * pixel[1] as f32
-                + 0.114 * pixel[2] as f32;
+            *value = 0.299 * pixel[0] as f32 + 0.587 * pixel[1] as f32 + 0.114 * pixel[2] as f32;
         }
     }
     block
@@ -264,9 +325,7 @@ fn apply_luma_delta(
             let pixel = image.get_pixel_mut(start_x + x as u32, start_y + y as u32);
             let delta = modified[y][x] - original[y][x];
             for channel in 0..3 {
-                pixel[channel] = (pixel[channel] as f32 + delta)
-                    .round()
-                    .clamp(0.0, 255.0) as u8;
+                pixel[channel] = (pixel[channel] as f32 + delta).round().clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -276,6 +335,38 @@ fn apply_luma_delta(
 mod tests {
     use super::*;
     use image::{imageops::FilterType, Rgba, RgbaImage};
+
+    #[test]
+    fn direct_directional_reads_match_full_haar_at_every_pixel_phase() {
+        let image = RgbaImage::from_fn(24, 24, |x, y| {
+            Rgba([
+                ((x * 47 + y * 61) % 256) as u8,
+                ((x * 89 + y * 23) % 256) as u8,
+                ((x * 17 + y * 97) % 256) as u8,
+                255,
+            ])
+        });
+        for profile in [QIM_PROFILE_LEGACY, QIM_PROFILE_PYRAMID] {
+            for y in 0..8 {
+                for x in 0..8 {
+                    let view = image::imageops::crop_imm(&image, x, y, 8, 8).to_image();
+                    let coefficients = forward_profile(read_luma_block(&view, 0, 0), profile);
+                    let (a, b) = coefficient_pair(profile);
+                    let reference = coefficients[a.1][a.0] - coefficients[b.1][b.0];
+                    let direct = read_difference_at_pixel(&image, x, y, profile);
+                    // 位级等值保护 QIM 边界；仅比较解出的文本会漏掉决定奇偶的细微浮点漂移。
+                    // Bitwise equality protects QIM boundaries; comparing decoded text alone would miss small floating-point changes that determine parity.
+                    assert_eq!(direct.to_bits(), reference.to_bits());
+                    for step in [3.0, 8.0, 12.0, 16.0] {
+                        let actual = read_bit_at_pixel(&image, x, y, step, profile);
+                        let expected = observe_difference(reference, step, profile);
+                        assert_eq!(actual.bit, expected.bit);
+                        assert_eq!(actual.confidence.to_bits(), expected.confidence.to_bits());
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn legacy_qim_round_trip_recovers_both_bits() {
@@ -323,14 +414,9 @@ mod tests {
         for block_y in 0..16 {
             for block_x in 0..16 {
                 let expected = (block_x + block_y) % 2 == 1;
-                let actual = read_bit_with_profile(
-                    &restored,
-                    block_x,
-                    block_y,
-                    16.0,
-                    QIM_PROFILE_PYRAMID,
-                )
-                .bit;
+                let actual =
+                    read_bit_with_profile(&restored, block_x, block_y, 16.0, QIM_PROFILE_PYRAMID)
+                        .bit;
                 correct += usize::from(actual == expected);
             }
         }

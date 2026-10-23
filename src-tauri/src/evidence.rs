@@ -1,4 +1,8 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs,
+    io::{self, Read},
+    path::Path,
+};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -42,8 +46,19 @@ struct EvidenceManifest {
 }
 
 pub fn file_sha256(path: &Path) -> io::Result<String> {
-    let bytes = fs::read(path)?;
-    Ok(hex_sha256(&bytes))
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    // 证据摘要与分块方式无关，固定缓冲区可以避免为大视频额外分配整文件大小的内存。
+    // Evidence digests are independent of chunk boundaries, so a fixed buffer avoids an extra whole-video allocation.
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 pub fn write_evidence_manifest(
@@ -88,8 +103,7 @@ pub fn verify_evidence_manifest(
     key: &WatermarkKey,
 ) -> io::Result<EvidenceVerifyResult> {
     let content = fs::read_to_string(path)?;
-    let manifest: EvidenceManifest =
-        serde_json::from_str(&content).map_err(json_error)?;
+    let manifest: EvidenceManifest = serde_json::from_str(&content).map_err(json_error)?;
     let observed_signature = manifest.manifest_signature.clone();
     let unsigned = UnsignedEvidenceManifest {
         generated_at: manifest.generated_at,

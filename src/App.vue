@@ -6,9 +6,14 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import BrandMark from "./components/BrandMark.vue";
+import { decodeEventSlot, decodeCountDelta } from "./taskState";
+import ImportedFiles from "./components/ImportedFiles.vue";
+import ResultPager from "./components/ResultPager.vue";
+import TaskProgressPanel from "./components/TaskProgressPanel.vue";
 import type {
   CancelTaskRequest,
   DecodeItemEvent,
+  DecodeItemResult,
   DecodeRequest,
   DecodeResponse,
   DropPathResolution,
@@ -39,6 +44,7 @@ const ENCODE_MEDIA_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "bmp", "tif", "ti
 const DECODE_MEDIA_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "mp4", "mov", "mkv", "avi", "webm"];
 const SCAN_IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"];
 const KEY_FILE_EXTENSIONS = ["key", "json"];
+const RESULT_PAGE_SIZE = 50;
 
 const messages = {
   zh: {
@@ -248,6 +254,31 @@ const messages = {
     windowMaximize: "最大化",
     windowRestore: "还原窗口",
     windowClose: "关闭",
+    advancedOptions: "高级设置",
+    removeFile: "移除此文件",
+    previousPage: "上一页",
+    nextPage: "下一页",
+    resultPages: "结果分页",
+    importingFiles: "正在读取导入文件…",
+    runningTask: "当前任务",
+    returnToTask: "查看任务",
+    recoveryHint: "默认几何恢复最多 10 秒；未识别的图片可单独尝试深入恢复。",
+    deepRecovery: "深入恢复（最多 60 秒）",
+    deepRecoveryRunning: "正在深入恢复…",
+    recoveryTimedOut: "恢复已达到时间限制，可尝试深入恢复或检查原始水印图片。",
+    recoveryNotFound: "未检测到有效水印，可尝试深入恢复旋转或缩放后的图片。",
+    recoveryKeyMismatch: "密钥无法通过验证，请检查密钥文件或密码。",
+    recoveryInvalidInput: "无法读取此媒体，请检查文件和格式。",
+    recoveryPayloadCorrupted: "已识别水印结构，但正文未通过认证；可尝试深入恢复。",
+    recoveryOtherError: "此文件处理失败，请查看诊断详情。",
+    diagnosticDetails: "诊断详情",
+    resultDetails: "检测详情",
+    mirroredTransform: "已检测到镜像",
+    shearTransform: "水平斜切",
+    resultsSummary: "共 {count} 个结果 · 成功 {succeeded} · 失败 {failed}",
+    taskElapsed: "已用 {seconds} 秒",
+    scanFailed: "扫描失败",
+    refreshing: "正在检测…",
   },
   en: {
     appTitle: "Privacy Watermark Codec",
@@ -456,6 +487,31 @@ const messages = {
     windowMaximize: "Maximize",
     windowRestore: "Restore window",
     windowClose: "Close",
+    advancedOptions: "Advanced settings",
+    removeFile: "Remove file",
+    previousPage: "Previous",
+    nextPage: "Next",
+    resultPages: "Result pages",
+    importingFiles: "Reading imported files…",
+    runningTask: "Active task",
+    returnToTask: "View task",
+    recoveryHint: "Standard geometry recovery runs for up to 10 seconds. Unrecognized images can be retried individually with deep recovery.",
+    deepRecovery: "Deep recovery (up to 60 seconds)",
+    deepRecoveryRunning: "Running deep recovery…",
+    recoveryTimedOut: "Recovery reached its time limit. Try deep recovery or check the original watermarked image.",
+    recoveryNotFound: "No valid watermark was found. Try deep recovery for a rotated or resized image.",
+    recoveryKeyMismatch: "The key could not be authenticated. Check your key files or password.",
+    recoveryInvalidInput: "This media could not be read. Check the file and its format.",
+    recoveryPayloadCorrupted: "A watermark structure was found, but its payload could not be authenticated. Try deep recovery.",
+    recoveryOtherError: "This file could not be processed. See the diagnostic details.",
+    diagnosticDetails: "Diagnostic details",
+    resultDetails: "Inspection details",
+    mirroredTransform: "Mirror detected",
+    shearTransform: "Horizontal shear",
+    resultsSummary: "{count} results · {succeeded} succeeded · {failed} failed",
+    taskElapsed: "Elapsed {seconds}s",
+    scanFailed: "Scan failed",
+    refreshing: "Checking…",
   },
 } as const;
 
@@ -487,6 +543,22 @@ const isWindowMaximized = ref(false);
 const decodePassword = ref("");
 const busy = ref(false);
 const cancelling = ref(false);
+const importing = ref(false);
+const ffmpegLoading = ref(false);
+const activeTaskKind = ref<TaskProgressKind | null>(null);
+const deepRecoveryRunning = ref(false);
+const taskElapsedSeconds = ref(0);
+const encodePage = ref(1);
+const decodePage = ref(1);
+const scanPage = ref(1);
+const decodeCompleted = ref(0);
+const decodeSucceeded = ref(0);
+let decodeTaskSlots: number[] = [];
+let decodeTaskPaths: string[] = [];
+let taskClock: number | undefined;
+let pendingProgress: TaskProgressEvent | undefined;
+let progressAnimationFrame: number | undefined;
+let eventListenersReady: Promise<void> = Promise.resolve();
 const errorMessage = ref("");
 const contextMessage = ref("");
 const encodeResult = ref<EncodeResponse | null>(null);
@@ -506,6 +578,47 @@ let unlistenTaskProgress: (() => void) | undefined;
 let unlistenDecodeItem: (() => void) | undefined;
 let unlistenScaleChanged: (() => void) | undefined;
 let unlistenDragDrop: (() => void) | undefined;
+
+const inputLocked = computed(() => busy.value || importing.value);
+const encodeHasVideo = computed(() => encodeInputs.value.some(isVideoPath));
+const decodeHasVideo = computed(() => decodeInputs.value.some(isVideoPath));
+const visibleEncodeItems = computed(() => encodeResult.value?.items.slice((encodePage.value - 1) * RESULT_PAGE_SIZE, encodePage.value * RESULT_PAGE_SIZE) || []);
+const visibleScanItems = computed(() => scanResult.value?.items.slice((scanPage.value - 1) * RESULT_PAGE_SIZE, scanPage.value * RESULT_PAGE_SIZE) || []);
+const visibleDecodeItems = computed(() => {
+  const start = (decodePage.value - 1) * RESULT_PAGE_SIZE;
+  // 分页只展开当前页，流式事件即使乱序到达也不会把空槽或上千条详情送进渲染树。
+  // Pagination expands only the current page, keeping empty slots and thousands of details out of the render tree even when streaming events arrive out of order.
+  return decodeResult.value?.items.slice(start, start + RESULT_PAGE_SIZE).flatMap((item, offset) => item ? [{ item, index: start + offset }] : []) || [];
+});
+const decodeSummary = computed(() => t("resultsSummary", {
+  count: decodeCompleted.value,
+  succeeded: decodeSucceeded.value,
+  failed: decodeCompleted.value - decodeSucceeded.value,
+}));
+const activeTaskLabel = computed(() => {
+  if (deepRecoveryRunning.value) return t("deepRecoveryRunning");
+  if (activeTaskKind.value === "encode") return t("tabEncode");
+  if (activeTaskKind.value === "scan") return t("tabScan");
+  return t("tabDecode");
+});
+const progressPanelProps = computed(() => ({
+  percent: progressPercent.value,
+  title: t("progressTitle"),
+  status: cancelling.value ? t("cancellingTask") : outcomeLabel(taskProgress.value?.outcome, taskProgress.value?.phase),
+  message: displayProgressMessage.value,
+  filesLabel: t("progressFiles"),
+  succeededLabel: t("progressSucceeded"),
+  failedLabel: t("progressFailedCount"),
+  unitLabel: unitKindLabel(taskProgress.value?.unitKind),
+}));
+
+function isVideoPath(path: string): boolean {
+  return /\.(mp4|mov|mkv|avi|webm)$/i.test(path);
+}
+
+function isTaskRunning(task: TaskProgressKind): boolean {
+  return busy.value && activeTaskKind.value === task;
+}
 
 watch(contextMessage, (message) => {
   if (contextMessageTimer !== undefined) {
@@ -533,11 +646,8 @@ const canEncode = computed(
     (keyMode.value !== "custom" || unicodeScalarCount(customPassword.value) >= 12),
 );
 
-const canDecode = computed(
-  () =>
-    decodeInputs.value.length > 0 &&
-    (decodeKeyFiles.value.length > 0 || unicodeScalarCount(decodePassword.value) >= 12),
-);
+const hasDecodeCredentials = computed(() => decodeKeyFiles.value.length > 0 || unicodeScalarCount(decodePassword.value) >= 12);
+const canDecode = computed(() => decodeInputs.value.length > 0 && hasDecodeCredentials.value);
 
 const canScan = computed(() => scanInputs.value.length > 0);
 const currentMessages = computed(() => messages[language.value]);
@@ -940,19 +1050,85 @@ function createTaskId(task: TaskProgressKind): string {
   return `${task}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function beginTaskProgress(task: TaskProgressKind): string {
+function beginTaskProgress(task: TaskProgressKind, total: number): string {
   const taskId = createTaskId(task);
+  activeTaskKind.value = task;
   activeTaskId.value = taskId;
+  pendingProgress = undefined;
+  if (progressAnimationFrame !== undefined) window.cancelAnimationFrame(progressAnimationFrame);
+  progressAnimationFrame = undefined;
+  taskElapsedSeconds.value = 0;
+  const startedAt = performance.now();
+  if (taskClock !== undefined) window.clearInterval(taskClock);
+  taskClock = window.setInterval(() => {
+    taskElapsedSeconds.value = Math.floor((performance.now() - startedAt) / 1000);
+  }, 1000);
   taskProgress.value = {
     taskId,
     task,
     phase: "queued",
     message: t("progressQueued"),
     current: 0,
-    total: 0,
+    total,
     percent: 0,
+    outcome: "running",
   };
   return taskId;
+}
+
+function finishTask() {
+  // 命令结束后丢弃尚未刷新的运行事件，避免最后一帧把完成或取消状态重新覆盖成运行中。
+  // Queued running events are discarded after the command settles so a final animation frame cannot overwrite completion or cancellation with a running state.
+  pendingProgress = undefined;
+  if (progressAnimationFrame !== undefined) window.cancelAnimationFrame(progressAnimationFrame);
+  progressAnimationFrame = undefined;
+  if (taskClock !== undefined) window.clearInterval(taskClock);
+  taskClock = undefined;
+  busy.value = false;
+  cancelling.value = false;
+  deepRecoveryRunning.value = false;
+}
+
+function completeTaskProgress(total: number, failed: number) {
+  if (!taskProgress.value) return;
+  const outcome = failed ? "completed_with_errors" : "completed";
+  taskProgress.value = {
+    ...taskProgress.value,
+    outcome,
+    phase: outcome,
+    message: t(failed ? "progressCompletedWithErrors" : "progressCompleted"),
+    current: total,
+    total,
+    percent: 100,
+    filesSucceeded: total - failed,
+    filesFailed: failed,
+    unitCurrent: undefined,
+    unitTotal: undefined,
+    unitLabel: undefined,
+  };
+}
+
+function acceptTaskProgress(progress: TaskProgressEvent) {
+  if (!busy.value || progress.taskId !== activeTaskId.value || progress.task !== activeTaskKind.value) return;
+  // 同一绘制帧只应用最新进度，避免候选评分的密集事件反复触发整页计算；终态则立即显示。
+  // Only the latest progress in a paint frame is applied, avoiding repeated page work from dense candidate events; terminal states are displayed immediately.
+  pendingProgress = progress;
+  const flush = () => {
+    progressAnimationFrame = undefined;
+    const incoming = pendingProgress;
+    pendingProgress = undefined;
+    if (!incoming || incoming.taskId !== activeTaskId.value) return;
+    taskProgress.value = {
+      ...incoming,
+      percent: clampFailurePercent(taskProgress.value?.percent, incoming.percent, incoming.outcome ?? incoming.phase),
+    };
+  };
+  if (progress.outcome && progress.outcome !== "running") {
+    if (progressAnimationFrame !== undefined) window.cancelAnimationFrame(progressAnimationFrame);
+    flush();
+  } else if (progressAnimationFrame === undefined) {
+    progressAnimationFrame = window.requestAnimationFrame(flush);
+  }
 }
 
 function showProgress(task: TaskProgressKind): boolean {
@@ -963,13 +1139,8 @@ async function cancelCurrentTask() {
   if (!activeTaskId.value || !busy.value || cancelling.value) return;
   cancelling.value = true;
   const request: CancelTaskRequest = { taskId: activeTaskId.value };
-  if (taskProgress.value) {
-    taskProgress.value = {
-      ...taskProgress.value,
-      phase: "cancelled",
-      message: t("cancellingTask"),
-    };
-  }
+  // 取消请求不等于后台已经退出；独立显示等待状态才能保留真实进度并阻止重复启动。
+  // A cancellation request does not mean the worker has exited; a separate waiting state preserves real progress and prevents a duplicate start.
   try {
     // 取消只提交任务编号，不携带密码、水印正文或媒体路径，避免取消请求暴露敏感上下文。
     // Cancellation submits only the task id, not passwords, watermark text, or media paths, so the request does not expose sensitive context.
@@ -1068,9 +1239,12 @@ function pickerHint(paths: string[], emptyHint: MessageKey): string {
 
 function mergeUniquePaths(current: string[], incoming: string[]): string[] {
   const merged = current.slice();
-  const seen = new Set(current.map((path) => path.toLocaleLowerCase()));
+  // 只有 Windows 的文件系统路径按大小写去重，其它平台必须保留同名大小写不同的独立文件。
+  // Only Windows filesystem paths are deduplicated without case; other platforms must retain distinct files whose names differ by case.
+  const identity = (path: string) => navigator.platform.startsWith("Win") ? path.toLowerCase() : path;
+  const seen = new Set(current.map(identity));
   for (const path of incoming) {
-    const key = path.toLocaleLowerCase();
+    const key = identity(path);
     if (!seen.has(key)) {
       seen.add(key);
       merged.push(path);
@@ -1122,7 +1296,16 @@ function showDropImportFeedback(accepted: number, ignored: number, truncated: bo
 }
 
 async function applyDroppedPaths(target: DropTarget, paths: string[]) {
-  if (busy.value || paths.length === 0) return;
+  if (inputLocked.value || paths.length === 0) return;
+  importing.value = true;
+  try {
+    await importDroppedPaths(target, paths);
+  } finally {
+    importing.value = false;
+  }
+}
+
+async function importDroppedPaths(target: DropTarget, paths: string[]) {
   errorMessage.value = "";
 
   if (target === "output-directory") {
@@ -1176,7 +1359,7 @@ async function registerNativeDragDrop() {
   // Tauri's native drag-drop event is required to obtain real filesystem paths; browser File objects do not reliably expose desktop absolute paths for the Rust backend.
   unlistenDragDrop = await getCurrentWebview().onDragDropEvent((event) => {
     const payload = event.payload;
-    if (busy.value) {
+    if (inputLocked.value) {
       activeDropTarget.value = null;
       return;
     }
@@ -1290,11 +1473,12 @@ async function syncWindowState() {
 }
 
 async function runEncode() {
-  if (!canEncode.value || busy.value) return;
+  if (!canEncode.value || inputLocked.value) return;
   busy.value = true;
   errorMessage.value = "";
   encodeResult.value = null;
-  const taskId = beginTaskProgress("encode");
+  await eventListenersReady;
+  const taskId = beginTaskProgress("encode", encodeInputs.value.length);
 
   const request: EncodeRequest = {
     inputPaths: encodeInputs.value,
@@ -1310,32 +1494,70 @@ async function runEncode() {
 
   try {
     encodeResult.value = await invoke<EncodeResponse>("encode_media", { request });
+    encodePage.value = 1;
+    completeTaskProgress(encodeResult.value.items.length, encodeResult.value.items.filter((item) => item.succeeded === false).length);
   } catch (error) {
     handleTaskError(error);
   } finally {
-    busy.value = false;
-    cancelling.value = false;
+    finishTask();
   }
 }
 
 function mergeStreamingDecodeItem(event: DecodeItemEvent) {
-  if (event.taskId && event.taskId !== activeTaskId.value) return;
-  const current = decodeResult.value?.items.slice() || [];
-  const existingIndex = current.findIndex((item) => item.inputPath === event.item.inputPath);
-  if (existingIndex >= 0) current.splice(existingIndex, 1, event.item);
-  else current.push(event.item);
+  if (event.taskId !== activeTaskId.value || !busy.value || !decodeResult.value) return;
+  const index = decodeEventSlot(event, activeTaskId.value, decodeTaskPaths, decodeTaskSlots);
+  if (index === undefined) return;
+  const previous = decodeResult.value.items[index];
+  // 原位更新稳定槽位，单项重试仍映射原批次位置，避免列表复制和错误覆盖首项。
+  // Update stable slots in place; single-item retries retain their batch position without copying the list or overwriting the first item.
+  const delta = decodeCountDelta(previous, event.item);
+  decodeCompleted.value += delta.completed;
+  decodeSucceeded.value += delta.succeeded;
+  decodeResult.value.items[index] = event.item;
+}
 
-  // 单文件完成事件只替换同一路径的条目，是为了让批处理结果逐项出现，同时防止最终响应或重复事件在界面中生成重复卡片。
-  // A completed-file event replaces the item for the same path so batch results appear incrementally without duplicate cards when the final response or a repeated event arrives.
-  decodeResult.value = { items: current };
+function decodeErrorLabel(item: DecodeItemResult): string {
+  if (item.errorCode === "recovery_timeout") return t("recoveryTimedOut");
+  if (item.errorCode === "header_not_found") return t("recoveryNotFound");
+  if (item.errorCode === "payload_corrupted") return t("recoveryPayloadCorrupted");
+  if (item.errorCode === "invalid_input") return t("recoveryInvalidInput");
+  if (item.errorCode === "authentication_failed") return t("recoveryKeyMismatch");
+  return item.error || t("recoveryOtherError");
+}
+
+async function retryDeepRecovery(index: number) {
+  const item = decodeResult.value?.items[index];
+  if (!item || inputLocked.value || !hasDecodeCredentials.value) return;
+  busy.value = true;
+  deepRecoveryRunning.value = true;
+  decodeTaskSlots = [index];
+  decodeTaskPaths = [item.inputPath];
+  await eventListenersReady;
+  const taskId = beginTaskProgress("decode", 1);
+  try {
+    const response = await invoke<DecodeResponse>("decode_media", { request: {
+      inputPaths: [item.inputPath], keyFiles: decodeKeyFiles.value.length ? decodeKeyFiles.value : undefined,
+      customPassword: decodePassword.value || undefined, frameParallelism: decodeFrameParallelism.value,
+      recoveryMode: "deep", taskId,
+    } satisfies DecodeRequest });
+    if (response.items[0]) mergeStreamingDecodeItem({ taskId, current: 1, total: 1, item: response.items[0] });
+    completeTaskProgress(1, response.items.filter((value) => !value.succeeded).length);
+  } catch (error) { handleTaskError(error); }
+  finally { finishTask(); }
 }
 
 async function runDecode() {
-  if (!canDecode.value || busy.value) return;
+  if (!canDecode.value || inputLocked.value) return;
   busy.value = true;
   errorMessage.value = "";
-  decodeResult.value = null;
-  const taskId = beginTaskProgress("decode");
+  decodeResult.value = { items: [] };
+  decodeCompleted.value = 0;
+  decodeSucceeded.value = 0;
+  decodePage.value = 1;
+  decodeTaskSlots = decodeInputs.value.map((_, index) => index);
+  decodeTaskPaths = decodeInputs.value.slice();
+  await eventListenersReady;
+  const taskId = beginTaskProgress("decode", decodeInputs.value.length);
 
   const request: DecodeRequest = {
     inputPaths: decodeInputs.value,
@@ -1351,12 +1573,14 @@ async function runDecode() {
       // 最终响应作为权威快照覆盖流式列表，是为了补齐极端情况下漏到前端的事件，同时保持后端输入顺序。
       // The final response replaces the streamed list as an authoritative snapshot, recovering any event missed by the frontend while preserving backend input order.
       decodeResult.value = response;
+      decodeCompleted.value = response.items.length;
+      decodeSucceeded.value = response.items.filter((item) => item.succeeded).length;
+      completeTaskProgress(response.items.length, response.items.length - decodeSucceeded.value);
     }
   } catch (error) {
     handleTaskError(error);
   } finally {
-    busy.value = false;
-    cancelling.value = false;
+    finishTask();
   }
 }
 
@@ -1381,11 +1605,12 @@ async function loadReleaseInfo() {
 }
 
 async function runScan() {
-  if (!canScan.value || busy.value) return;
+  if (!canScan.value || inputLocked.value) return;
   busy.value = true;
   errorMessage.value = "";
   scanResult.value = null;
-  const taskId = beginTaskProgress("scan");
+  await eventListenersReady;
+  const taskId = beginTaskProgress("scan", scanInputs.value.length);
 
   const request: ScanRequest = {
     inputPaths: scanInputs.value,
@@ -1394,11 +1619,12 @@ async function runScan() {
 
   try {
     scanResult.value = await invoke<ScanResponse>("scan_privacy_watermark", { request });
+    scanPage.value = 1;
+    completeTaskProgress(scanResult.value.items.length, scanResult.value.items.filter((item) => item.error).length);
   } catch (error) {
     handleTaskError(error);
   } finally {
-    busy.value = false;
-    cancelling.value = false;
+    finishTask();
   }
 }
 
@@ -1481,32 +1707,19 @@ onMounted(() => {
   }).then((unlisten) => {
     unlistenLaunchContext = unlisten;
   });
-  void listen<DecodeItemEvent>("pwc-decode-item", (event) => {
-    mergeStreamingDecodeItem(event.payload);
-  }).then((unlisten) => {
-    unlistenDecodeItem = unlisten;
-  });
-  void listen<TaskProgressEvent>("pwc-task-progress", (event) => {
-    if (!event.payload.taskId || event.payload.taskId === activeTaskId.value) {
-      // 只接收当前任务的进度，避免上一次后台事件延迟到达后覆盖新任务状态。
-      // Only the active task progress is accepted so delayed events from a previous task cannot overwrite the new task state.
-      taskProgress.value = {
-        ...event.payload,
-        percent: clampFailurePercent(
-          taskProgress.value?.percent,
-          event.payload.percent,
-          event.payload.outcome ?? event.payload.phase,
-        ),
-      };
-    }
-  }).then((unlisten) => {
-    unlistenTaskProgress = unlisten;
+  eventListenersReady = Promise.all([
+    listen<DecodeItemEvent>("pwc-decode-item", (event) => mergeStreamingDecodeItem(event.payload)).then((unlisten) => { unlistenDecodeItem = unlisten; }),
+    listen<TaskProgressEvent>("pwc-task-progress", (event) => acceptTaskProgress(event.payload)).then((unlisten) => { unlistenTaskProgress = unlisten; }),
+  ]).then(() => undefined).catch(() => {
+    // 实时事件不可用时仍允许命令返回最终结果，避免监听注册失败把任务永久锁在准备状态。
+    // Final command results remain available if live events fail, preventing listener registration from locking tasks in preparation forever.
   });
   window.addEventListener("resize", updateViewportScale);
   window.visualViewport?.addEventListener("resize", updateViewportScale);
 });
 
 onBeforeUnmount(() => {
+  finishTask();
   if (launchTimer !== undefined) window.clearTimeout(launchTimer);
   if (contextMessageTimer !== undefined) window.clearTimeout(contextMessageTimer);
   unlistenLaunchContext?.();
@@ -1558,6 +1771,12 @@ onBeforeUnmount(() => {
       <button :class="{ active: activeTab === 'ffmpeg' }" @click="selectTab('ffmpeg')">{{ t("tabFfmpeg") }}</button>
     </nav>
 
+    <section v-if="taskProgress" class="global-task-bar" :aria-label="activeTaskLabel">
+      <div class="global-task-heading"><strong>{{ activeTaskLabel }}</strong><span>{{ taskElapsedSeconds }}s</span><button v-if="busy" type="button" class="secondary-button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div>
+      <TaskProgressPanel :progress="taskProgress" v-bind="progressPanelProps" />
+    </section>
+    <p v-if="activeTab === 'decode'" class="recovery-hint">{{ t("recoveryHint") }}</p>
+    <p v-if="importing" role="status">{{ t("importingFiles") }}</p>
     <Teleport to="body">
       <Transition name="context-toast">
         <div v-if="contextMessage" class="context-banner" role="status" aria-live="polite">
@@ -1570,9 +1789,9 @@ onBeforeUnmount(() => {
     <section v-if="activeTab === 'encode'" class="panel panel-grid encode-grid">
       <article class="card">
         <div class="section-heading"><span>01</span><div><h2>{{ t("mediaOutput") }}</h2><p>{{ t("mediaOutputDesc") }}</p></div></div>
-        <button :class="['file-picker', { 'drag-active': activeDropTarget === 'encode-inputs' }]" type="button" data-drop-target="encode-inputs" :disabled="busy" @click="chooseEncodeInputs"><strong>{{ t("chooseMedia") }}</strong><span>{{ activeDropTarget === "encode-inputs" ? t("dropRelease") : pickerHint(encodeInputs, "chooseMediaHint") }}</span></button>
-        <div v-if="encodeInputs.length" class="import-summary"><div class="import-summary-head"><small>{{ t("currentImport") }}</small><button type="button" :disabled="busy" @click="clearEncodeInputs">{{ t("clearImportedFiles") }}</button></div><div class="file-list inline-list"><span v-for="name in previewNames(encodeInputs)" :key="name">{{ name }}</span><span v-if="restCount(encodeInputs)">+{{ restCount(encodeInputs) }}</span></div></div>
-        <button :class="['file-picker', { 'drag-active': activeDropTarget === 'output-directory' }]" type="button" data-drop-target="output-directory" :disabled="busy" @click="chooseOutputDir"><strong>{{ t("chooseOutput") }}</strong><span>{{ activeDropTarget === "output-directory" ? t("dropRelease") : (outputDir || t("chooseOutputHint")) }}</span></button>
+        <button :class="['file-picker', { 'drag-active': activeDropTarget === 'encode-inputs' }]" type="button" data-drop-target="encode-inputs" :disabled="inputLocked" @click="chooseEncodeInputs"><strong>{{ t("chooseMedia") }}</strong><span>{{ activeDropTarget === "encode-inputs" ? t("dropRelease") : pickerHint(encodeInputs, "chooseMediaHint") }}</span></button>
+        <ImportedFiles v-model:paths="encodeInputs" :disabled="inputLocked" :title="t('currentImport')" :clear-label="t('clearImportedFiles')" :remove-label="t('removeFile')" :previous-label="t('previousPage')" :next-label="t('nextPage')" />
+        <button :class="['file-picker', { 'drag-active': activeDropTarget === 'output-directory' }]" type="button" data-drop-target="output-directory" :disabled="inputLocked" @click="chooseOutputDir"><strong>{{ t("chooseOutput") }}</strong><span>{{ activeDropTarget === "output-directory" ? t("dropRelease") : (outputDir || t("chooseOutputHint")) }}</span></button>
       </article>
 
       <article class="card main-card">
@@ -1588,35 +1807,21 @@ onBeforeUnmount(() => {
       <article class="card action-card">
         <div class="section-heading"><span>03</span><div><h2>{{ t("paramsRun") }}</h2><p>{{ t("paramsRunDesc") }}</p></div></div>
         <label v-if="keyMode === 'custom'" class="field"><span>{{ t("customPassword") }}</span><input v-model="customPassword" type="password" autocomplete="new-password" :placeholder="t('customPasswordHint')" /></label>
-        <label class="field range-field"><span>{{ t("embedStrength") }}: {{ strength }}</span><input v-model.number="strength" type="range" min="3" max="20" step="1" /><small>{{ t("strengthHint") }}</small></label>
-        <label class="field range-field"><span>{{ t("frameParallelism") }}: {{ frameParallelism }}</span><input v-model.number="frameParallelism" type="range" min="1" max="8" step="1" /><small>{{ t("frameParallelismHint") }}</small></label>
+        <details class="advanced-settings"><summary>{{ t("advancedOptions") }}</summary><label class="field range-field"><span>{{ t("embedStrength") }}: {{ strength }}</span><input v-model.number="strength" type="range" min="3" max="20" step="1" /><small>{{ t("strengthHint") }}</small></label>
+        <label v-if="encodeHasVideo" class="field range-field"><span>{{ t("frameParallelism") }}: {{ frameParallelism }}</span><input v-model.number="frameParallelism" type="range" min="1" max="8" step="1" /><small>{{ t("frameParallelismHint") }}</small></label></details>
         <label class="toggle-row"><input v-model="writeKeyFile" type="checkbox" :disabled="keyMode !== 'custom'" /><span><strong>{{ t("writeKey") }}</strong><small>{{ keyMode === "custom" ? t("writeKeyCustom") : t("writeKeyRandom") }}</small></span></label>
         <small class="field-warning">{{ t("keyFileWarning") }}</small>
         <div class="task-actions">
-          <button class="primary" :disabled="!canEncode || busy" @click="runEncode">{{ busy ? t("encoding") : t("startEncode") }}</button>
+          <button class="primary" :disabled="!canEncode || inputLocked" @click="runEncode">{{ isTaskRunning('encode') ? t("encoding") : t("startEncode") }}</button>
           <button v-if="showProgress('encode') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button>
-        </div>
-        <div v-if="showProgress('encode') && !encodeResult" class="progress-card encode-progress">
-          <div class="progress-top">
-            <strong>{{ t("progressTitle") }}</strong>
-            <span>{{ progressPercent }}%</span>
-          </div>
-          <div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div>
-          <p class="progress-phase">{{ outcomeLabel(taskProgress?.outcome, taskProgress?.phase) }}</p>
-          <p class="progress-meta">
-            <span v-if="taskProgress?.currentPath">{{ basename(taskProgress.currentPath) }}</span>
-            <span v-if="taskProgress?.total">{{ t("progressFiles") }} {{ taskProgress.current }}/{{ taskProgress.total }} · {{ t("progressSucceeded") }} {{ taskProgress.filesSucceeded ?? 0 }} · {{ t("progressFailedCount") }} {{ taskProgress.filesFailed ?? 0 }}</span>
-            <span v-if="taskProgress?.unitTotal">{{ unitKindLabel(taskProgress.unitKind) }} {{ taskProgress.unitCurrent }}/{{ taskProgress.unitTotal }}</span>
-            <span v-if="encodeProgressExtra">{{ encodeProgressExtra }}</span>
-          </p>
         </div>
         <div v-if="encodeResult" :class="['result-card', encodeResult.items.some((item) => item.succeeded === false) ? '' : 'success']">
           <h3>{{ encodeResult.items.some((item) => item.succeeded === false) ? t("progressCompletedWithErrors") : t("encodeDone") }}</h3>
           <p>{{ t("output") }}: {{ encodeResult.outputRoot }}</p>
           <p v-if="encodeResult.manifestPath">{{ t("evidenceManifest") }}: {{ encodeResult.manifestPath }}</p>
           <p class="field-warning">{{ t("keyFileWarning") }}</p>
-          <div class="result-items">
-            <article v-for="item in encodeResult.items" :key="item.outputPath || item.inputPath">
+          <ResultPager v-model:page="encodePage" :total="encodeResult.items.length" :page-size="RESULT_PAGE_SIZE" :previous-label="t('previousPage')" :next-label="t('nextPage')" :label="t('detectResult')" /><div class="result-items">
+            <article v-for="item in visibleEncodeItems" :key="item.outputPath || item.inputPath">
               <strong>{{ basename(item.outputPath || item.inputPath) }}</strong>
               <span>{{ encodeItemStatus(item) }}</span>
               <small class="path-line">{{ item.outputPath || item.inputPath }}</small>
@@ -1627,11 +1832,11 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else-if="activeTab === 'decode'" class="panel panel-grid decode-grid">
-      <article class="card"><div class="section-heading"><span>01</span><div><h2>{{ t("selectDecodeMedia") }}</h2><p>{{ t("selectDecodeMediaDesc") }}</p></div></div><button :class="['file-picker tall', { 'drag-active': activeDropTarget === 'decode-inputs' }]" type="button" data-drop-target="decode-inputs" :disabled="busy" @click="chooseDecodeInputs"><strong>{{ t("chooseWatermarked") }}</strong><span>{{ activeDropTarget === "decode-inputs" ? t("dropRelease") : pickerHint(decodeInputs, "chooseMediaClick") }}</span></button><div v-if="decodeInputs.length" class="import-summary"><div class="import-summary-head"><small>{{ t("currentImport") }}</small><button type="button" :disabled="busy" @click="clearDecodeInputs">{{ t("clearImportedFiles") }}</button></div><div class="file-list inline-list"><span v-for="name in previewNames(decodeInputs)" :key="name">{{ name }}</span><span v-if="restCount(decodeInputs)">+{{ restCount(decodeInputs) }}</span></div></div></article>
+      <article class="card"><div class="section-heading"><span>01</span><div><h2>{{ t("selectDecodeMedia") }}</h2><p>{{ t("selectDecodeMediaDesc") }}</p></div></div><button :class="['file-picker tall', { 'drag-active': activeDropTarget === 'decode-inputs' }]" type="button" data-drop-target="decode-inputs" :disabled="inputLocked" @click="chooseDecodeInputs"><strong>{{ t("chooseWatermarked") }}</strong><span>{{ activeDropTarget === "decode-inputs" ? t("dropRelease") : pickerHint(decodeInputs, "chooseMediaClick") }}</span></button><ImportedFiles v-model:paths="decodeInputs" :disabled="inputLocked" :title="t('currentImport')" :clear-label="t('clearImportedFiles')" :remove-label="t('removeFile')" :previous-label="t('previousPage')" :next-label="t('nextPage')" /></article>
       <article class="card action-card">
         <div class="section-heading"><span>02</span><div><h2>{{ t("credentials") }}</h2><p>{{ t("credentialsDesc") }}</p></div></div>
         <div class="credential-picker">
-          <button :class="['file-picker', { 'drag-active': activeDropTarget === 'key-file' }]" type="button" data-drop-target="key-file" :disabled="busy" @click="chooseKeyFile">
+          <button :class="['file-picker', { 'drag-active': activeDropTarget === 'key-file' }]" type="button" data-drop-target="key-file" :disabled="inputLocked" @click="chooseKeyFile">
             <strong>{{ t("chooseKeyFile") }}</strong>
             <span>{{ activeDropTarget === "key-file" ? t("dropRelease") : pickerHint(decodeKeyFiles, "chooseKeyFileHint") }}</span>
           </button>
@@ -1641,24 +1846,25 @@ onBeforeUnmount(() => {
           <button v-if="decodeKeyFiles.length" class="secondary-button clear-key-button" type="button" @click="clearDecodeKeyFile">{{ t("clearKeyFile") }}</button>
         </div>
         <label class="field"><span>{{ t("orPassword") }}</span><input v-model="decodePassword" type="password" autocomplete="current-password" :placeholder="t('passwordModeC')" /></label>
-        <label class="field range-field"><span>{{ t("decodeFrameParallelism") }}: {{ decodeFrameParallelism }}</span><input v-model.number="decodeFrameParallelism" type="range" min="1" max="8" step="1" /><small>{{ t("decodeFrameParallelismHint") }}</small></label>
-        <div class="task-actions"><button class="primary" :disabled="!canDecode || busy" @click="runDecode">{{ busy ? t("decoding") : t("startDecode") }}</button><button v-if="showProgress('decode') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div>
-        <div v-if="showProgress('decode')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ outcomeLabel(taskProgress?.outcome, taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}: {{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressFiles") }}: {{ taskProgress.current }}/{{ taskProgress.total }} · {{ t("progressSucceeded") }} {{ taskProgress.filesSucceeded ?? 0 }} · {{ t("progressFailedCount") }} {{ taskProgress.filesFailed ?? 0 }}</small><small v-if="taskProgress?.unitTotal">{{ unitKindLabel(taskProgress.unitKind) }}: {{ taskProgress.unitCurrent }}/{{ taskProgress.unitTotal }} {{ taskProgress.unitLabel }}</small><small v-if="displayProgressMessage">{{ displayProgressMessage }}</small></div>
-      </article>
+        <details v-if="decodeHasVideo" class="advanced-settings"><summary>{{ t("advancedOptions") }}</summary><label class="field range-field"><span>{{ t("decodeFrameParallelism") }}: {{ decodeFrameParallelism }}</span><input v-model.number="decodeFrameParallelism" type="range" min="1" max="8" step="1" /><small>{{ t("decodeFrameParallelismHint") }}</small></label></details>
+        <div class="task-actions"><button class="primary" :disabled="!canDecode || inputLocked" @click="runDecode">{{ isTaskRunning('decode') ? t("decoding") : t("startDecode") }}</button><button v-if="showProgress('decode') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div>
+              </article>
       <article class="card result-panel">
         <div class="section-heading"><span>03</span><div><h2>{{ t("detectResult") }}</h2><p>{{ t("detectResultDesc") }}</p></div></div>
         <div v-if="decodeResult" class="result-card success decode-results">
-          <p class="result-count">{{ busy && activeTaskId === taskProgress?.taskId ? t("decodeStreamingCount", { count: decodeResult.items.length, total: decodeInputs.length }) : t("decodeResultCount", { count: decodeResult.items.length }) }}</p>
-          <article v-for="(item, index) in decodeResult.items" :key="`${item.inputPath}-${index}`" :class="['decode-item', { failed: !item.succeeded }]">
+          <p class="result-count">{{ decodeSummary }}</p>
+          <ResultPager v-model:page="decodePage" :total="decodeResult.items.length" :page-size="RESULT_PAGE_SIZE" :previous-label="t('previousPage')" :next-label="t('nextPage')" :label="t('detectResult')" />
+          <article v-for="{ item, index } in visibleDecodeItems" :key="`${item.inputPath}-${index}`" :class="['decode-item', { failed: !item.succeeded }]">
             <div class="decode-title"><strong>{{ index + 1 }}. {{ basename(item.inputPath) }}</strong><span v-if="item.succeeded" :class="['integrity', item.integrity]">{{ integrityLabel(item.integrity) }}</span><span v-else class="integrity failed">{{ t("decodeFailed") }}</span></div>
             <p v-if="item.succeeded" class="watermark-output">{{ item.text }}</p>
-            <p v-else class="decode-error">{{ item.error }}</p>
-            <small class="path-line">{{ item.inputPath }}</small>
+            <template v-else><p class="decode-error">{{ decodeErrorLabel(item) }}</p><button v-if="item.errorCode === 'recovery_timeout' || item.errorCode === 'header_not_found' || item.errorCode === 'payload_corrupted'" class="secondary-button" type="button" :disabled="busy" @click="retryDeepRecovery(index)">{{ t("deepRecovery") }}</button></template>
+            <details class="result-details"><summary>{{ t("resultDetails") }}</summary><small class="path-line">{{ item.inputPath }}</small><p v-if="item.error">{{ item.error }}</p>
             <small v-if="item.succeeded && item.mediaType === 'image'">{{ t("fingerprintDistance") }} {{ item.fingerprintDistance ?? "-" }} · {{ t("correctedCodewords") }} {{ item.correctedCodewords }}</small>
             <small v-else-if="item.succeeded">{{ t("validFrames") }} {{ item.validFrames ?? 0 }}/{{ item.frameCount ?? 0 }} · {{ t("expectedFrames") }} {{ item.expectedFrameCount ?? "-" }} · {{ t("modifiedFrames") }} {{ item.modifiedFrames ?? 0 }} · {{ t("missingFrames") }} {{ item.missingFrames ?? 0 }} · {{ t("insertedFrames") }} {{ item.insertedFrames ?? 0 }} · {{ t("deletedFrames") }} {{ item.deletedFrames ?? 0 }} · {{ t("replacedFrames") }} {{ item.replacedFrames ?? 0 }} · {{ t("duplicateFrames") }} {{ item.duplicateFrames ?? 0 }} · {{ t("outOfOrderFrames") }} {{ item.outOfOrderFrames ?? 0 }} · {{ t("unreadableFrames") }} {{ item.unreadableFrames ?? 0 }} · {{ t("transformedFrames") }} {{ item.transformedFrames ?? 0 }}</small>
             <small v-if="item.succeeded && item.timelineAnomalies?.length" class="timeline-summary">{{ t("timelineAnomalies") }}: {{ timelineAnomalySummary(item.timelineAnomalies) }}</small>
             <small v-if="item.succeeded && item.syncRegistration">{{ t("syncRegistration") }} {{ item.syncRegistration.rotationDegrees.toFixed(2) }}° / ×{{ item.syncRegistration.scale.toFixed(3) }} / Δ{{ item.syncRegistration.translationX }},{{ item.syncRegistration.translationY }} / {{ item.syncRegistration.score.toFixed(2) }}</small>
-            <small v-if="item.succeeded && item.tamperRegions.length">{{ t("tamperRegions") }} {{ item.tamperRegions.length }}</small>
+            <small v-if="item.syncRegistration?.mirrored">{{ t("mirroredTransform") }}</small><small v-if="item.syncRegistration?.shearX">{{ t("shearTransform") }} {{ (Math.atan(item.syncRegistration.shearX) * 180 / Math.PI).toFixed(2) }}°</small>
+            <small v-if="item.succeeded && item.tamperRegions.length">{{ t("tamperRegions") }} {{ item.tamperRegions.length }}</small></details>
           </article>
         </div>
         <p v-else class="empty-state">{{ t("waitingDecode") }}</p>
@@ -1666,8 +1872,8 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else-if="activeTab === 'scan'" class="panel panel-grid scan-grid">
-      <article class="card action-card"><div class="section-heading"><span>01</span><div><h2>{{ t("importUnknown") }}</h2><p>{{ t("importUnknownDesc") }}</p></div></div><button :class="['file-picker tall', { 'drag-active': activeDropTarget === 'scan-inputs' }]" type="button" data-drop-target="scan-inputs" :disabled="busy" @click="chooseScanInputs"><strong>{{ t("chooseUnknown") }}</strong><span>{{ activeDropTarget === "scan-inputs" ? t("dropRelease") : pickerHint(scanInputs, "unknownHint") }}</span></button><div v-if="scanInputs.length" class="import-summary"><div class="import-summary-head"><small>{{ t("currentImport") }}</small><button type="button" :disabled="busy" @click="clearScanInputs">{{ t("clearImportedFiles") }}</button></div><div class="file-list inline-list"><span v-for="name in previewNames(scanInputs)" :key="name">{{ name }}</span><span v-if="restCount(scanInputs)">+{{ restCount(scanInputs) }}</span></div></div><div class="task-actions"><button class="primary" :disabled="!canScan || busy" @click="runScan">{{ busy ? t("scanning") : t("scanWatermark") }}</button><button v-if="showProgress('scan') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div><div v-if="showProgress('scan')" class="progress-card"><div class="progress-top"><strong>{{ t("progressTitle") }}</strong><span>{{ progressPercent }}%</span></div><div class="progress-track"><div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div></div><p>{{ outcomeLabel(taskProgress?.outcome, taskProgress?.phase) }}</p><small v-if="taskProgress?.currentPath">{{ t("progressCurrentFile") }}: {{ basename(taskProgress.currentPath) }}</small><small v-if="taskProgress?.total">{{ t("progressFiles") }}: {{ taskProgress.current }}/{{ taskProgress.total }} · {{ t("progressSucceeded") }} {{ taskProgress.filesSucceeded ?? 0 }} · {{ t("progressFailedCount") }} {{ taskProgress.filesFailed ?? 0 }}</small><small v-if="taskProgress?.unitTotal">{{ unitKindLabel(taskProgress.unitKind) }}: {{ taskProgress.unitCurrent }}/{{ taskProgress.unitTotal }} {{ taskProgress.unitLabel }}</small><small v-if="displayProgressMessage">{{ displayProgressMessage }}</small></div><p class="hint-text">{{ t("scanHint") }}</p></article>
-      <article class="card result-panel wide-result"><div class="section-heading"><span>02</span><div><h2>{{ t("scanFeedback") }}</h2><p>{{ t("scanFeedbackDesc") }}</p></div></div><div v-if="scanResult" class="scan-results"><article v-for="item in scanResult.items" :key="item.inputPath" class="scan-item"><div class="decode-title"><strong>{{ basename(item.inputPath) }}</strong><span :class="['scan-status', item.status]">{{ item.status === "detected" ? t("foundTrace") : t("notDetected") }}</span></div><p class="scan-summary">{{ item.summary }}</p><small v-if="item.width && item.height">{{ t("imageSize") }} {{ item.width }}×{{ item.height }}</small><div v-if="item.detections.length" class="detection-list"><article v-for="detection in item.detections" :key="`${detection.detector}-${detection.label}`"><div><strong>{{ detection.label }}</strong><span>{{ detection.confidence }} · {{ detectionAccessLabel(detection) }}</span></div><p>{{ detection.content }}</p></article></div></article></div><p v-else class="empty-state">{{ t("waitingScan") }}</p></article>
+      <article class="card action-card"><div class="section-heading"><span>01</span><div><h2>{{ t("importUnknown") }}</h2><p>{{ t("importUnknownDesc") }}</p></div></div><button :class="['file-picker tall', { 'drag-active': activeDropTarget === 'scan-inputs' }]" type="button" data-drop-target="scan-inputs" :disabled="inputLocked" @click="chooseScanInputs"><strong>{{ t("chooseUnknown") }}</strong><span>{{ activeDropTarget === "scan-inputs" ? t("dropRelease") : pickerHint(scanInputs, "unknownHint") }}</span></button><ImportedFiles v-model:paths="scanInputs" :disabled="inputLocked" :title="t('currentImport')" :clear-label="t('clearImportedFiles')" :remove-label="t('removeFile')" :previous-label="t('previousPage')" :next-label="t('nextPage')" /><div class="task-actions"><button class="primary" :disabled="!canScan || inputLocked" @click="runScan">{{ isTaskRunning('scan') ? t("scanning") : t("scanWatermark") }}</button><button v-if="showProgress('scan') && busy && activeTaskId === taskProgress?.taskId" class="secondary-button cancel-button" type="button" :disabled="cancelling" @click="cancelCurrentTask">{{ cancelling ? t("cancellingTask") : t("cancelTask") }}</button></div><p class="hint-text">{{ t("scanHint") }}</p></article>
+      <article class="card result-panel wide-result"><div class="section-heading"><span>02</span><div><h2>{{ t("scanFeedback") }}</h2><p>{{ t("scanFeedbackDesc") }}</p></div></div><div v-if="scanResult" class="scan-results"><ResultPager v-model:page="scanPage" :total="scanResult.items.length" :page-size="RESULT_PAGE_SIZE" :previous-label="t('previousPage')" :next-label="t('nextPage')" :label="t('detectResult')" /><article v-for="item in visibleScanItems" :key="item.inputPath" class="scan-item"><div class="decode-title"><strong>{{ basename(item.inputPath) }}</strong><span :class="['scan-status', item.error ? 'failed' : item.status]">{{ item.error ? t("failure") : item.status === "detected" ? t("foundTrace") : t("notDetected") }}</span></div><p class="scan-summary">{{ item.summary }}</p><small v-if="item.width && item.height">{{ t("imageSize") }} {{ item.width }}×{{ item.height }}</small><div v-if="item.detections.length" class="detection-list"><article v-for="detection in item.detections" :key="`${detection.detector}-${detection.label}`"><div><strong>{{ detection.label }}</strong><span>{{ detection.confidence }} · {{ detectionAccessLabel(detection) }}</span></div><p>{{ detection.content }}</p></article></div></article></div><p v-else class="empty-state">{{ t("waitingScan") }}</p></article>
     </section>
 
     <section v-else class="panel panel-grid ffmpeg-grid">

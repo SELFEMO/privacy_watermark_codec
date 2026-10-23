@@ -623,9 +623,9 @@ if (targetPlatform) {
 // 打包入口同样补 rustup PATH，避免 Cursor 过期环境再次在 cargo metadata 处失败。
 // Release entry restores rustup PATH too so a stale Cursor environment cannot fail again at cargo metadata.
 applyRustToolchainToProcessEnv();
-// 发布构建必须从空的前端、Cargo 和安装包目录开始，避免旧架构产物或旧资源被复制进新的安装包。
-// Release builds must start with empty frontend, Cargo, and package directories so stale architecture outputs or resources cannot enter a new installer.
-cleanProject("all");
+// 只清理分发与临时配置，Cargo 会按目标和输入重建，保留其缓存可复用测试时已编译的依赖。
+// Only distribution outputs and temporary configuration are cleaned; Cargo rebuilds by target and input, preserving dependencies already compiled during tests.
+cleanProject("release");
 await run(nodePath, [preflightScript]);
 await run(nodePath, manifestArgs);
 const bundlePlatform = resolveFfmpegPlatformForBundle(targetPlatform);

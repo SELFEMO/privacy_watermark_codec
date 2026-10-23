@@ -180,7 +180,7 @@ impl RobustHeader {
             || header.original_width < 256
             || header.original_height < 256
             || header.flags & !FLAG_VIDEO != 0
-            || header.qim_profile > crate::dwt_qim::QIM_PROFILE_PYRAMID
+            || header.qim_profile > crate::dwt_qim::QIM_PROFILE_SYNC
         {
             return Err(CoreError::HeaderNotFound);
         }
@@ -193,7 +193,11 @@ impl RobustHeader {
 }
 
 pub fn robust_flags(temporal: Option<&TemporalPayload>) -> u8 {
-    if temporal.is_some() { FLAG_VIDEO } else { 0 }
+    if temporal.is_some() {
+        FLAG_VIDEO
+    } else {
+        0
+    }
 }
 
 pub fn create_encrypted_body(payload: &InnerPayload, key: &WatermarkKey) -> Result<Vec<u8>> {
@@ -228,8 +232,13 @@ pub fn open_encrypted_body(body: &[u8], key: &WatermarkKey) -> Result<InnerPaylo
 
 fn encode_compact_payload(payload: &InnerPayload) -> Result<Vec<u8>> {
     let text = payload.text.as_bytes();
-    if text.len() > u16::MAX as usize || payload.width > u16::MAX as u32 || payload.height > u16::MAX as u32 {
-        return Err(CoreError::InvalidArgument("水印文本或图像尺寸超出协议范围".into()));
+    if text.len() > u16::MAX as usize
+        || payload.width > u16::MAX as u32
+        || payload.height > u16::MAX as u32
+    {
+        return Err(CoreError::InvalidArgument(
+            "水印文本或图像尺寸超出协议范围".into(),
+        ));
     }
     let temporal = payload.temporal.as_ref();
     let mut bytes = Vec::with_capacity(48 + text.len() + payload.partition_fingerprints.len() * 9);
@@ -242,7 +251,8 @@ fn encode_compact_payload(payload: &InnerPayload) -> Result<Vec<u8>> {
     bytes.extend_from_slice(&(text.len() as u16).to_le_bytes());
     bytes.extend_from_slice(text);
     for partition in &payload.partition_fingerprints {
-        let hash = u64::from_str_radix(&partition.hash_hex, 16).map_err(|_| CoreError::PayloadCorrupted)?;
+        let hash = u64::from_str_radix(&partition.hash_hex, 16)
+            .map_err(|_| CoreError::PayloadCorrupted)?;
         bytes.push(partition.index as u8);
         bytes.extend_from_slice(&hash.to_le_bytes());
     }
@@ -311,7 +321,11 @@ fn decode_compact_payload(bytes: &[u8]) -> Result<InnerPayload> {
         width,
         height,
         created_at: String::new(),
-        media_kind: if temporal.is_some() { "video_frame".into() } else { "image".into() },
+        media_kind: if temporal.is_some() {
+            "video_frame".into()
+        } else {
+            "image".into()
+        },
         partition_fingerprints: partitions,
         temporal,
     })
@@ -329,7 +343,11 @@ pub fn bytes_to_bits(bytes: &[u8]) -> Vec<bool> {
 
 pub fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
     bits.chunks_exact(8)
-        .map(|chunk| chunk.iter().fold(0_u8, |value, bit| (value << 1) | u8::from(*bit)))
+        .map(|chunk| {
+            chunk
+                .iter()
+                .fold(0_u8, |value, bit| (value << 1) | u8::from(*bit))
+        })
         .collect()
 }
 
@@ -344,13 +362,19 @@ fn take_u8(bytes: &[u8], cursor: &mut usize) -> Result<u8> {
     Ok(take(bytes, cursor, 1)?[0])
 }
 fn take_u16(bytes: &[u8], cursor: &mut usize) -> Result<u16> {
-    Ok(u16::from_le_bytes(take(bytes, cursor, 2)?.try_into().unwrap()))
+    Ok(u16::from_le_bytes(
+        take(bytes, cursor, 2)?.try_into().unwrap(),
+    ))
 }
 fn take_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(take(bytes, cursor, 4)?.try_into().unwrap()))
+    Ok(u32::from_le_bytes(
+        take(bytes, cursor, 4)?.try_into().unwrap(),
+    ))
 }
 fn take_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64> {
-    Ok(u64::from_le_bytes(take(bytes, cursor, 8)?.try_into().unwrap()))
+    Ok(u64::from_le_bytes(
+        take(bytes, cursor, 8)?.try_into().unwrap(),
+    ))
 }
 
 fn decode_fixed_hex<const N: usize>(value: &str) -> Result<[u8; N]> {
@@ -421,7 +445,8 @@ mod tests {
                 frame_count: 30,
             }),
         );
-        let opened = open_encrypted_body(&create_encrypted_body(&payload, &key).unwrap(), &key).unwrap();
+        let opened =
+            open_encrypted_body(&create_encrypted_body(&payload, &key).unwrap(), &key).unwrap();
         assert_eq!(opened.text, payload.text);
         assert_eq!(opened.temporal, payload.temporal);
     }

@@ -1,0 +1,99 @@
+[
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (2).png",
+    "size": [
+      2109,
+      2812
+    ],
+    "ok": true,
+    "seconds": 0.35,
+    "result": "ok elapsed=0.344s chars=7 integrity=Modified angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (3).png",
+    "size": [
+      2728,
+      3637
+    ],
+    "ok": true,
+    "seconds": 0.46,
+    "result": "ok elapsed=0.453s chars=7 integrity=Modified angle=180.00000 scale=1.0000000 events=4"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (4).png",
+    "size": [
+      2728,
+      3637
+    ],
+    "ok": true,
+    "seconds": 0.526,
+    "result": "ok elapsed=0.519s chars=7 integrity=Modified angle=0.00000 scale=1.0000000 events=5"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (5).png",
+    "size": [
+      2728,
+      3637
+    ],
+    "ok": true,
+    "seconds": 0.704,
+    "result": "ok elapsed=0.697s chars=7 integrity=Modified angle=180.00000 scale=1.0000000 events=8"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (6).png",
+    "size": [
+      2557,
+      3410
+    ],
+    "ok": true,
+    "seconds": 1.811,
+    "result": "ok elapsed=1.803s chars=7 integrity=Modified angle=2.92383 scale=1.0000308 events=9"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (7).png",
+    "size": [
+      2855,
+      3637
+    ],
+    "ok": true,
+    "seconds": 0.948,
+    "result": "ok elapsed=0.941s chars=7 integrity=Modified angle=0.00000 scale=1.0000000 events=9"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (8).png",
+    "size": [
+      2728,
+      3637
+    ],
+    "ok": true,
+    "seconds": 0.165,
+    "result": "ok elapsed=0.159s chars=7 integrity=Modified angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (9).png",
+    "size": [
+      2426,
+      3033
+    ],
+    "ok": true,
+    "seconds": 0.508,
+    "result": "ok elapsed=0.502s chars=7 integrity=Modified angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked.png",
+    "size": [
+      2728,
+      3637
+    ],
+    "ok": true,
+    "seconds": 0.216,
+    "result": "ok elapsed=0.210s chars=7 integrity=Intact angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "file": "ZQH_Momi_20250323.jpg",
+    "size": null,
+    "ok": false,
+    "seconds": 7.778,
+    "result": "failed elapsed=7.768s error=未检测到通过校验的水印头；图片可能没有本软件水印，也可能超出当前恢复范围，可尝试深入恢复 events=48"
+  }
+]

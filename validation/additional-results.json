@@ -1,0 +1,42 @@
+[
+  {
+    "case": "JPEG quality 90",
+    "ok": true,
+    "result": "ok elapsed=0.034s chars=21 integrity=Intact angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "case": "JPEG quality 85",
+    "ok": true,
+    "result": "ok elapsed=0.023s chars=21 integrity=Uncertain angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "case": "asymmetric crop 13/29/32/17 pixels",
+    "ok": true,
+    "result": "ok elapsed=0.141s chars=21 integrity=Modified angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "case": "25 percent opaque quadrant",
+    "ok": true,
+    "result": "ok elapsed=0.021s chars=21 integrity=Modified angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "case": "wrong matching-salt key",
+    "ok": false,
+    "result": "failed elapsed=0.017s error=\u5bc6\u7801\u6216\u5bc6\u94a5\u9519\u8bef\uff0c\u65e0\u6cd5\u89e3\u5bc6\u6c34\u5370\u5185\u5bb9 events=1"
+  },
+  {
+    "case": "lossless video sample 1",
+    "ok": true,
+    "result": "ok elapsed=0.022s chars=21 integrity=Uncertain angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "case": "lossless video sample 2",
+    "ok": true,
+    "result": "ok elapsed=0.022s chars=21 integrity=Uncertain angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "case": "lossless video sample 3",
+    "ok": true,
+    "result": "ok elapsed=0.021s chars=21 integrity=Uncertain angle=0.00000 scale=1.0000000 events=1"
+  }
+]

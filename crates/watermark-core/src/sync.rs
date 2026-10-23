@@ -13,6 +13,10 @@ pub struct SyncRegistration {
     #[serde(default)]
     pub translation_y: i32,
     pub score: f32,
+    #[serde(default)]
+    pub shear_x: f32,
+    #[serde(default)]
+    pub mirrored: bool,
 }
 
 impl SyncRegistration {
@@ -23,6 +27,8 @@ impl SyncRegistration {
             translation_x: 0,
             translation_y: 0,
             score,
+            shear_x: 0.0,
+            mirrored: false,
         }
     }
 
@@ -31,6 +37,8 @@ impl SyncRegistration {
             && (self.scale - 1.0).abs() < 0.001
             && self.translation_x == 0
             && self.translation_y == 0
+            && self.shear_x.abs() < 0.00001
+            && !self.mirrored
     }
 }
 
@@ -52,9 +60,53 @@ pub(crate) struct AffineTransform {
     sine: f32,
     inverse_scale: f32,
     nearest: bool,
+    shear_x: f32,
 }
 
 impl AffineTransform {
+    pub(crate) fn translated(mut self, x: f32, y: f32) -> Self {
+        // 采样原点允许亚像素偏移，避免编辑器裁边的半像素中心差被误当作载荷损坏。
+        // Subpixel sampling offsets keep half-pixel center shifts from editor crops from being mistaken for payload damage.
+        self.source_center_x += x;
+        self.source_center_y += y;
+        self
+    }
+
+    pub(crate) fn shifted_origin(self, x: f32, y: f32) -> Self {
+        self.translated(
+            (self.cosine * x + self.sine * y) * self.inverse_scale,
+            (-self.sine * x + self.cosine * y) * self.inverse_scale,
+        )
+    }
+
+    pub(crate) fn horizontal_shear(width: u32, height: u32, slope: f32) -> Option<Self> {
+        let mut transform = Self::new(width, height, 0.0, 1.0)?;
+        transform.nearest = true;
+        transform.shear_x = slope;
+        Some(transform)
+    }
+
+    pub(crate) fn registered(
+        width: u32,
+        height: u32,
+        angle: f32,
+        scale: f32,
+        x: f32,
+        y: f32,
+    ) -> Option<Self> {
+        let mut transform = Self::new(width, height, angle, scale)?;
+        // 连续角靠近四分之一圈时也交换画布方向，避免只照顾精确九十度而裁掉一般大角度图片。
+        // Swap the canvas near quarter turns as well, avoiding a special case that preserves exact ninety-degree images but crops general large rotations.
+        if ((angle + 90.0).rem_euclid(180.0) - 90.0).abs() > 45.0 {
+            transform.output_width = (height as f32 * scale).round().max(1.0) as u32;
+            transform.output_height = (width as f32 * scale).round().max(1.0) as u32;
+            transform.output_center_x = (transform.output_width as f32 - 1.0) * 0.5;
+            transform.output_center_y = (transform.output_height as f32 - 1.0) * 0.5;
+        }
+        transform.nearest = true;
+        Some(transform.shifted_origin(x, y))
+    }
+
     pub(crate) fn new(
         source_width: u32,
         source_height: u32,
@@ -78,10 +130,10 @@ impl AffineTransform {
         } else {
             (source_width, source_height)
         };
-        let output_width = ((base_width as f64 * scale as f64).round() as u64)
-            .clamp(1, u32::MAX as u64) as u32;
-        let output_height = ((base_height as f64 * scale as f64).round() as u64)
-            .clamp(1, u32::MAX as u64) as u32;
+        let output_width =
+            ((base_width as f64 * scale as f64).round() as u64).clamp(1, u32::MAX as u64) as u32;
+        let output_height =
+            ((base_height as f64 * scale as f64).round() as u64).clamp(1, u32::MAX as u64) as u32;
         Some(Self::from_parts(
             source_width,
             source_height,
@@ -232,10 +284,8 @@ impl AffineTransform {
         } else {
             let source_width_f = source_width as f32;
             let source_height_f = source_height as f32;
-            let recovered_width =
-                (cosine * source_width_f - sine * source_height_f) / determinant;
-            let recovered_height =
-                (cosine * source_height_f - sine * source_width_f) / determinant;
+            let recovered_width = (cosine * source_width_f - sine * source_height_f) / determinant;
+            let recovered_height = (cosine * source_height_f - sine * source_width_f) / determinant;
             if !recovered_width.is_finite()
                 || !recovered_height.is_finite()
                 || recovered_width < 1.0
@@ -294,10 +344,7 @@ impl AffineTransform {
             {
                 return None;
             }
-            (
-                snap_to_nearest_block_period(recovered_width),
-                source_height,
-            )
+            (snap_to_nearest_block_period(recovered_width), source_height)
         } else {
             let recovered_height = (source_height as f32 - source_width as f32 * sine) / cosine;
             if !recovered_height.is_finite()
@@ -306,10 +353,7 @@ impl AffineTransform {
             {
                 return None;
             }
-            (
-                source_width,
-                snap_to_nearest_block_period(recovered_height),
-            )
+            (source_width, snap_to_nearest_block_period(recovered_height))
         };
         Some(Self::from_parts(
             source_width,
@@ -391,6 +435,7 @@ impl AffineTransform {
             sine: radians.sin(),
             inverse_scale: 1.0 / content_scale,
             nearest,
+            shear_x: 0.0,
         }
     }
 
@@ -409,7 +454,7 @@ impl AffineTransform {
     pub(crate) fn sample_rgba(&self, image: &RgbaImage, x: f32, y: f32) -> Option<Rgba<u8>> {
         let dx = (x - self.output_center_x) * self.inverse_scale;
         let dy = (y - self.output_center_y) * self.inverse_scale;
-        let source_x = self.cosine * dx + self.sine * dy + self.source_center_x;
+        let source_x = self.cosine * dx + (self.sine + self.shear_x) * dy + self.source_center_x;
         let source_y = -self.sine * dx + self.cosine * dy + self.source_center_y;
         if self.nearest {
             nearest_sample(image, source_x, source_y)
@@ -492,7 +537,6 @@ fn aspect_canvas_growth(width: u32, height: u32, rotation_degrees: f32) -> Optio
     let growth = width_growth.max(height_growth).max(1.0);
     growth.is_finite().then_some(growth)
 }
-
 
 pub fn trim_uniform_border(source: &RgbaImage) -> Option<RgbaImage> {
     if source.width() < 64 || source.height() < 64 {
@@ -596,60 +640,119 @@ pub(crate) fn has_uniform_rotation_padding(image: &RgbaImage) -> bool {
     counts.into_iter().skip(1).max().unwrap_or(0) >= 3
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PaddingHint {
+    pub angle: f32,
+    pub confidence: f32,
+}
 
-#[allow(dead_code)]
-pub(crate) fn rotation_padding_angle_hints(image: &RgbaImage) -> Vec<f32> {
-    if !has_uniform_rotation_padding(image) {
-        return Vec::new();
-    }
-    let maximum_depth = (image.width().min(image.height()) / 3).clamp(24, 384);
-    let stride = (maximum_depth / 96).max(1);
+pub(crate) fn padding_hints(image: &RgbaImage) -> Vec<PaddingHint> {
     let mut estimates = Vec::new();
-    for corner_right in [false, true] {
-        for corner_bottom in [false, true] {
-            if let Some(angle) = padding_boundary_angle(
-                image,
-                corner_right,
-                corner_bottom,
-                true,
-                maximum_depth,
-                stride,
-            ) {
-                estimates.push(angle);
-            }
-            if let Some(angle) = padding_boundary_angle(
-                image,
-                corner_right,
-                corner_bottom,
-                false,
-                maximum_depth,
-                stride,
-            ) {
-                estimates.push(angle);
+    // 裁回原高度的旋转图常只剩两个白角，必须根据多条边界的直线一致性判断，不能要求三个白角。
+    // Rotations cropped back to the original height often retain only two white corners; use agreement across fitted boundaries instead of requiring three white corners.
+    for vertical in [false, true] {
+        for far in [false, true] {
+            let length = if vertical {
+                image.width()
+            } else {
+                image.height()
+            };
+            let depth = if vertical {
+                image.height()
+            } else {
+                image.width()
+            };
+            let stride = (length / 256).max(1);
+            for segment in 0..4 {
+                let mut points = Vec::new();
+                for along in (0..length).step_by(stride as usize) {
+                    if along * 4 / length != segment {
+                        continue;
+                    }
+                    let pixel = |inward| {
+                        let across = if far { depth - 1 - inward } else { inward };
+                        if vertical {
+                            image.get_pixel(along, across)
+                        } else {
+                            image.get_pixel(across, along)
+                        }
+                    };
+                    let is_fill = |p: &Rgba<u8>| {
+                        p[3] <= 8
+                            || p[0].min(p[1]).min(p[2]) >= 254
+                            || p[0].max(p[1]).max(p[2]) <= 1
+                    };
+                    if !is_fill(pixel(0)) {
+                        continue;
+                    }
+                    let mut inward = 0;
+                    while inward < depth / 3 && is_fill(pixel(inward)) {
+                        inward += 1;
+                    }
+                    if inward > 2 && inward < depth / 3 {
+                        points.push((along as f64, inward as f64));
+                    }
+                }
+                if points.len() < 12 {
+                    continue;
+                }
+                let count = points.len() as f64;
+                let mx = points.iter().map(|p| p.0).sum::<f64>() / count;
+                let my = points.iter().map(|p| p.1).sum::<f64>() / count;
+                let variance = points.iter().map(|p| (p.0 - mx).powi(2)).sum::<f64>();
+                if variance < 1.0 {
+                    continue;
+                }
+                let slope = points.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum::<f64>() / variance;
+                let error = points
+                    .iter()
+                    .map(|p| (p.1 - my - slope * (p.0 - mx)).abs())
+                    .sum::<f64>()
+                    / count;
+                // 边界斜率保留方向，先验证实际逆旋转；只取绝对值会让另一方向及其镜像耗尽预算。
+                // Preserve the boundary slope's sign to verify the measured inverse first; absolute angles waste the budget on the opposite direction and its mirrors.
+                let direction = if vertical { -1.0 } else { 1.0 } * if far { -1.0 } else { 1.0 };
+                let angle = (slope.atan().to_degrees() * direction) as f32;
+                if error < 1.0 && (0.05..=44.8).contains(&angle.abs()) {
+                    estimates.push((angle, (1.0 - error as f32).max(0.0)));
+                }
             }
         }
     }
-    estimates.retain(|value| (0.05..=20.0).contains(value));
-    if estimates.is_empty() {
+    if estimates.len() < 2 {
         return Vec::new();
     }
-    estimates.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let median = estimates[estimates.len() / 2];
-    let nearby: Vec<f32> = estimates
-        .into_iter()
-        .filter(|value| (*value - median).abs() <= 2.0)
+    estimates.sort_by(|a, b| a.0.abs().total_cmp(&b.0.abs()));
+    let median = estimates[estimates.len() / 2].0.abs();
+    let agreeing: Vec<_> = estimates
+        .iter()
+        .filter(|p| (p.0.abs() - median).abs() < 0.1)
         .collect();
-    let magnitude = if nearby.is_empty() {
-        median
-    } else {
-        nearby.iter().sum::<f32>() / nearby.len() as f32
-    };
-    if !(0.05..=20.0).contains(&magnitude) {
+    if agreeing.len() < 2 {
         return Vec::new();
     }
-    // 白边斜率提示只服务常见小角快捷路径；±180° 任意角由 10° 分箱归一梯子覆盖，避免把 34° 噪声当成 7° 提示。
-    // Padding-slope hints only serve the common small-angle shortcut; arbitrary ±180° angles are covered by the 10° bin-and-refine ladder so 34° noise cannot replace a 7° hint.
-    vec![-magnitude, magnitude]
+    let sign = if agreeing.iter().map(|p| p.0.signum() * p.1).sum::<f32>() >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let angle = sign * agreeing.iter().map(|p| p.0.abs()).sum::<f32>() / agreeing.len() as f32;
+    let confidence = agreeing.iter().map(|p| p.1).sum::<f32>() / agreeing.len() as f32;
+    vec![
+        PaddingHint { angle, confidence },
+        PaddingHint {
+            angle: -angle,
+            confidence,
+        },
+    ]
+}
+
+#[cfg(test)]
+pub(crate) fn rotation_padding_angle_hints(image: &RgbaImage) -> Vec<f32> {
+    padding_hints(image)
+        .into_iter()
+        .map(|hint| hint.angle)
+        .collect()
 }
 
 #[allow(dead_code)]
@@ -680,13 +783,29 @@ fn padding_boundary_angle(
         while inward < inward_limit {
             let (x, y) = if scan_rows {
                 (
-                    if corner_right { image.width() - 1 - inward } else { inward },
-                    if corner_bottom { image.height() - 1 - depth } else { depth },
+                    if corner_right {
+                        image.width() - 1 - inward
+                    } else {
+                        inward
+                    },
+                    if corner_bottom {
+                        image.height() - 1 - depth
+                    } else {
+                        depth
+                    },
                 )
             } else {
                 (
-                    if corner_right { image.width() - 1 - depth } else { depth },
-                    if corner_bottom { image.height() - 1 - inward } else { inward },
+                    if corner_right {
+                        image.width() - 1 - depth
+                    } else {
+                        depth
+                    },
+                    if corner_bottom {
+                        image.height() - 1 - inward
+                    } else {
+                        inward
+                    },
                 )
             };
             if padding_pixel_kind(image.get_pixel(x, y)) != expected_kind {
@@ -739,12 +858,7 @@ fn padding_boundary_angle(
     angle.is_finite().then_some(angle)
 }
 
-fn uniform_padding_patch_kind(
-    image: &RgbaImage,
-    start_x: u32,
-    start_y: u32,
-    side: u32,
-) -> u8 {
+fn uniform_padding_patch_kind(image: &RgbaImage, start_x: u32, start_y: u32, side: u32) -> u8 {
     let sample_offsets = [0, side / 2, side.saturating_sub(1)];
     let mut expected = 0_u8;
     for offset_y in sample_offsets {
@@ -785,12 +899,9 @@ pub(crate) fn transform_rgba_image(
     rotation_degrees: f32,
     scale: f32,
 ) -> DynamicImage {
-    let Some(transform) = AffineTransform::new(
-        source.width(),
-        source.height(),
-        rotation_degrees,
-        scale,
-    ) else {
+    let Some(transform) =
+        AffineTransform::new(source.width(), source.height(), rotation_degrees, scale)
+    else {
         return DynamicImage::ImageRgba8(source.clone());
     };
     let Some(output) = materialize_transform(source, &transform) else {
@@ -893,12 +1004,23 @@ where
 
 pub fn registration_candidates(image: &DynamicImage) -> Vec<RegistrationCandidate> {
     const ANGLES: [f32; 20] = [
-        -5.0, -3.0, -2.5, -2.0, -1.0, -0.5, -0.25, -0.1, 0.0, 0.1, 0.25, 0.5,
-        1.0, 2.0, 2.5, 3.0, 5.0, 90.0, -90.0, 180.0,
+        -5.0, -3.0, -2.5, -2.0, -1.0, -0.5, -0.25, -0.1, 0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 2.5, 3.0,
+        5.0, 90.0, -90.0, 180.0,
     ];
     const SCALES: [f32; 13] = [
-        0.5, 0.625, 0.75, 0.8, 0.875, 0.95, 1.0, 1.05, 1.125, 1.25, 1.333_333_4,
-        1.5, 1.75,
+        0.5,
+        0.625,
+        0.75,
+        0.8,
+        0.875,
+        0.95,
+        1.0,
+        1.05,
+        1.125,
+        1.25,
+        1.333_333_4,
+        1.5,
+        1.75,
     ];
     let mut candidates = Vec::new();
     let source = image.to_rgba8();
@@ -907,7 +1029,8 @@ pub fn registration_candidates(image: &DynamicImage) -> Vec<RegistrationCandidat
             if angle == 0.0 && (scale - 1.0).abs() < f32::EPSILON {
                 continue;
             }
-            let Some(transform) = AffineTransform::new(source.width(), source.height(), angle, scale)
+            let Some(transform) =
+                AffineTransform::new(source.width(), source.height(), angle, scale)
             else {
                 continue;
             };
@@ -922,6 +1045,8 @@ pub fn registration_candidates(image: &DynamicImage) -> Vec<RegistrationCandidat
                     translation_x: 0,
                     translation_y: 0,
                     score: 0.0,
+                    shear_x: 0.0,
+                    mirrored: false,
                 },
             });
         }
@@ -937,10 +1062,13 @@ fn nearest_sample(image: &RgbaImage, x: f32, y: f32) -> Option<Rgba<u8>> {
     {
         return None;
     }
-    Some(*image.get_pixel(
-        x.round().clamp(0.0, image.width().saturating_sub(1) as f32) as u32,
-        y.round().clamp(0.0, image.height().saturating_sub(1) as f32) as u32,
-    ))
+    Some(
+        *image.get_pixel(
+            x.round().clamp(0.0, image.width().saturating_sub(1) as f32) as u32,
+            y.round()
+                .clamp(0.0, image.height().saturating_sub(1) as f32) as u32,
+        ),
+    )
 }
 
 fn bilinear_sample(image: &RgbaImage, x: f32, y: f32) -> Option<Rgba<u8>> {
@@ -965,9 +1093,7 @@ fn bilinear_sample(image: &RgbaImage, x: f32, y: f32) -> Option<Rgba<u8>> {
     for channel in 0..4 {
         let top = p00[channel] as f32 * (1.0 - fx) + p10[channel] as f32 * fx;
         let bottom = p01[channel] as f32 * (1.0 - fx) + p11[channel] as f32 * fx;
-        result[channel] = (top * (1.0 - fy) + bottom * fy)
-            .round()
-            .clamp(0.0, 255.0) as u8;
+        result[channel] = (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8;
     }
     Some(Rgba(result))
 }
@@ -995,14 +1121,8 @@ mod tests {
         let (w, h, deg) = (2728_u32, 3637_u32, 2.0_f32);
         let rad = deg.to_radians();
         let expanded_w = (w as f32 * rad.cos() + h as f32 * rad.sin()).round() as u32;
-        let t = AffineTransform::new_aabb_axis_cropped_correction(
-            expanded_w,
-            h,
-            2.0,
-            1.0,
-            true,
-        )
-        .unwrap();
+        let t = AffineTransform::new_aabb_axis_cropped_correction(expanded_w, h, 2.0, 1.0, true)
+            .unwrap();
         assert_eq!(t.output_width(), 2728, "width {}", t.output_width());
         assert_eq!(t.output_height(), 3637);
     }
@@ -1036,8 +1156,10 @@ mod tests {
     fn aabb_inverse_of_non_integer_angles_matches_original() {
         for (w, h, deg) in [(960_u32, 1280_u32, 17.3_f32), (960, 1280, 41.7)] {
             let rad = deg.to_radians();
-            let expanded_w = (w as f32 * rad.cos().abs() + h as f32 * rad.sin().abs()).round() as u32;
-            let expanded_h = (w as f32 * rad.sin().abs() + h as f32 * rad.cos().abs()).round() as u32;
+            let expanded_w =
+                (w as f32 * rad.cos().abs() + h as f32 * rad.sin().abs()).round() as u32;
+            let expanded_h =
+                (w as f32 * rad.sin().abs() + h as f32 * rad.cos().abs()).round() as u32;
             let t = AffineTransform::new_aabb_padded_correction(expanded_w, expanded_h, deg, 1.0)
                 .expect("non-singular AABB inverse");
             assert!(
@@ -1082,9 +1204,10 @@ mod tests {
         let clockwise = materialize_exact_orientation_checked(&source, 90.0, || Ok::<(), ()>(()))
             .unwrap()
             .unwrap();
-        let restored = materialize_exact_orientation_checked(&clockwise, -90.0, || Ok::<(), ()>(()))
-            .unwrap()
-            .unwrap();
+        let restored =
+            materialize_exact_orientation_checked(&clockwise, -90.0, || Ok::<(), ()>(()))
+                .unwrap()
+                .unwrap();
         assert_eq!(restored, source);
     }
 
@@ -1097,7 +1220,8 @@ mod tests {
 
     #[test]
     fn expanded_rotation_canvas_restores_dimensions_without_rescaling_content() {
-        let transform = AffineTransform::new_expanded_canvas_correction(1692, 1269, -2.5, 1.0).unwrap();
+        let transform =
+            AffineTransform::new_expanded_canvas_correction(1692, 1269, -2.5, 1.0).unwrap();
         assert!((transform.output_width() as i32 - 1600).abs() <= 2);
         assert!((transform.output_height() as i32 - 1200).abs() <= 2);
         assert!((transform.inverse_scale - 1.0).abs() < 0.0001);
@@ -1105,7 +1229,13 @@ mod tests {
 
     #[test]
     fn fixed_rotation_canvas_restores_content_scale_inside_the_same_dimensions() {
-        let transform = AffineTransform::new_fixed_canvas_fit_correction(1600, 1200, -2.5, aspect_canvas_growth(1600, 1200, -2.5).unwrap()).unwrap();
+        let transform = AffineTransform::new_fixed_canvas_fit_correction(
+            1600,
+            1200,
+            -2.5,
+            aspect_canvas_growth(1600, 1200, -2.5).unwrap(),
+        )
+        .unwrap();
         assert_eq!(transform.output_width(), 1600);
         assert_eq!(transform.output_height(), 1200);
         assert!(transform.inverse_scale < 1.0);
@@ -1113,14 +1243,16 @@ mod tests {
 
     #[test]
     fn tight_rotated_bounds_recover_the_original_canvas_shape() {
-        let transform = AffineTransform::new_tight_bounds_correction(1651, 1269, -2.5, 1.0).unwrap();
+        let transform =
+            AffineTransform::new_tight_bounds_correction(1651, 1269, -2.5, 1.0).unwrap();
         assert!((transform.output_width() as i32 - 1600).abs() <= 2);
         assert!((transform.output_height() as i32 - 1200).abs() <= 2);
     }
 
     #[test]
     fn tight_rotated_bounds_remove_embedded_content_zoom_from_the_canvas() {
-        let transform = AffineTransform::new_tight_bounds_correction(1700, 1307, -2.5, 0.97).unwrap();
+        let transform =
+            AffineTransform::new_tight_bounds_correction(1700, 1307, -2.5, 0.97).unwrap();
         assert!((transform.output_width() as i32 - 1600).abs() <= 4);
         assert!((transform.output_height() as i32 - 1200).abs() <= 4);
     }
@@ -1197,9 +1329,11 @@ mod tests {
             }
         });
         let hints = rotation_padding_angle_hints(&image);
-        assert!(hints
-            .iter()
-            .any(|angle| (angle.abs() - 7.0).abs() <= 0.5));
+        assert!(
+            hints[0] < 0.0,
+            "the measured inverse direction must be first: {hints:?}"
+        );
+        assert!(hints.iter().any(|angle| (angle.abs() - 7.0).abs() <= 0.5));
     }
 
     #[test]

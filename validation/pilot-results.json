@@ -1,0 +1,100 @@
+[
+  {
+    "dataset": "pilot-photo",
+    "case": "original",
+    "seconds": 0.221,
+    "ok": true,
+    "result": "ok elapsed=0.213s chars=14 integrity=Intact angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "dataset": "pilot-photo",
+    "case": "rotate 0.4, zoom 1.01",
+    "seconds": 4.778,
+    "ok": true,
+    "result": "ok elapsed=4.770s chars=14 integrity=Modified angle=-0.39884 scale=0.9901073 events=27"
+  },
+  {
+    "dataset": "pilot-photo",
+    "case": "rotate 1.7, zoom 1.03",
+    "seconds": 4.967,
+    "ok": true,
+    "result": "ok elapsed=4.955s chars=14 integrity=Modified angle=-1.70022 scale=0.9708926 events=27"
+  },
+  {
+    "dataset": "pilot-photo",
+    "case": "rotation and trimmed borders",
+    "seconds": 4.75,
+    "ok": true,
+    "result": "ok elapsed=4.742s chars=14 integrity=Modified angle=-1.70022 scale=0.9708926 events=27"
+  },
+  {
+    "dataset": "pilot-photo",
+    "case": "rotation and JPEG quality 85",
+    "seconds": 10.011,
+    "ok": false,
+    "result": "failed elapsed=10.000s error=已达到几何恢复时间上限；可选择深入恢复，超时不表示图片没有水印 events=29"
+  },
+  {
+    "dataset": "pilot-photo",
+    "case": "rotate -5.6, zoom 1.07",
+    "seconds": 4.997,
+    "ok": true,
+    "result": "ok elapsed=4.988s chars=14 integrity=Modified angle=5.59962 scale=0.9345573 events=27"
+  },
+  {
+    "dataset": "pilot-photo",
+    "case": "rotate 12.8, zoom 1.1",
+    "seconds": 6.092,
+    "ok": true,
+    "result": "ok elapsed=6.081s chars=14 integrity=Modified angle=-12.79726 scale=0.9090931 events=27"
+  },
+  {
+    "dataset": "pilot-holdout",
+    "case": "original",
+    "seconds": 0.022,
+    "ok": true,
+    "result": "ok elapsed=0.017s chars=14 integrity=Intact angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "dataset": "pilot-holdout",
+    "case": "rotate 0.4, zoom 1.01",
+    "seconds": 2.498,
+    "ok": false,
+    "result": "failed elapsed=2.493s error=未检测到通过校验的水印头；图片可能没有本软件水印，也可能超出当前恢复范围，可尝试深入恢复 events=64"
+  },
+  {
+    "dataset": "pilot-holdout",
+    "case": "rotate 1.7, zoom 1.03",
+    "seconds": 3.868,
+    "ok": false,
+    "result": "failed elapsed=3.863s error=未检测到通过校验的水印头；图片可能没有本软件水印，也可能超出当前恢复范围，可尝试深入恢复 events=66"
+  },
+  {
+    "dataset": "pilot-holdout",
+    "case": "rotation and trimmed borders",
+    "seconds": 3.882,
+    "ok": false,
+    "result": "failed elapsed=3.876s error=未检测到通过校验的水印头；图片可能没有本软件水印，也可能超出当前恢复范围，可尝试深入恢复 events=66"
+  },
+  {
+    "dataset": "pilot-holdout",
+    "case": "rotation and JPEG quality 85",
+    "seconds": 1.733,
+    "ok": false,
+    "result": "failed elapsed=1.728s error=未检测到通过校验的水印头；图片可能没有本软件水印，也可能超出当前恢复范围，可尝试深入恢复 events=56"
+  },
+  {
+    "dataset": "pilot-holdout",
+    "case": "rotate -5.6, zoom 1.07",
+    "seconds": 3.105,
+    "ok": false,
+    "result": "failed elapsed=3.100s error=未检测到通过校验的水印头；图片可能没有本软件水印，也可能超出当前恢复范围，可尝试深入恢复 events=42"
+  },
+  {
+    "dataset": "pilot-holdout",
+    "case": "rotate 12.8, zoom 1.1",
+    "seconds": 4.604,
+    "ok": false,
+    "result": "failed elapsed=4.598s error=未检测到通过校验的水印头；图片可能没有本软件水印，也可能超出当前恢复范围，可尝试深入恢复 events=66"
+  }
+]

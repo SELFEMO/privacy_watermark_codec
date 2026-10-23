@@ -27,7 +27,17 @@ pub struct DropPathResolution {
 }
 
 #[tauri::command]
-pub fn resolve_drop_paths(request: ResolveDropPathsRequest) -> DropPathResolution {
+pub async fn resolve_drop_paths(
+    request: ResolveDropPathsRequest,
+) -> Result<DropPathResolution, String> {
+    // 文件夹递归可能访问慢磁盘，把它移出命令线程才能让拖放期间的窗口交互继续响应。
+    // Recursive folder access may hit slow disks, so running it off the command thread keeps the window responsive during drops.
+    tauri::async_runtime::spawn_blocking(move || resolve_drop_paths_blocking(request))
+        .await
+        .map_err(|error| format!("导入文件夹失败：{error}"))
+}
+
+fn resolve_drop_paths_blocking(request: ResolveDropPathsRequest) -> DropPathResolution {
     let allowed_extensions = request
         .allowed_extensions
         .into_iter()
@@ -177,7 +187,7 @@ mod tests {
         fs::write(nested.join("second.JPG"), b"jpg").expect("write image");
         fs::write(nested.join("ignored.txt"), b"text").expect("write text");
 
-        let result = resolve_drop_paths(ResolveDropPathsRequest {
+        let result = resolve_drop_paths_blocking(ResolveDropPathsRequest {
             paths: vec![root.to_string_lossy().into_owned()],
             allowed_extensions: vec!["png".into(), "jpg".into()],
             expand_directories: true,

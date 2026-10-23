@@ -31,7 +31,9 @@ pub enum CoreError {
     #[error("扫描文件超过 80,000,000 字节上限")]
     ScanFileTooLarge,
 
-    #[error("未检测到有效水印头；图片可能没有使用本软件编码，或旋转后铺满裁切/严重压缩破坏了块周期。无白边的小角度旋转铺满裁切可能对不齐网格；旧一级高频在旋转插值后也可能无法恢复")]
+    #[error(
+        "未检测到通过校验的水印头；图片可能没有本软件水印，也可能超出当前恢复范围，可尝试深入恢复"
+    )]
     HeaderNotFound,
 
     #[error("已识别到水印结构，但正文无法通过纠错与认证；图片可能被过度遮挡、压缩或修改")]
@@ -52,6 +54,9 @@ pub enum CoreError {
     #[error("序列化失败：{0}")]
     Serialization(#[from] serde_json::Error),
 
+    #[error("已达到几何恢复时间上限；可选择深入恢复，超时不表示图片没有水印")]
+    RecoveryTimeout,
+
     #[error("任务已取消")]
     Cancelled,
 
@@ -66,9 +71,9 @@ mod tests {
     use super::CoreError;
 
     #[test]
-    fn header_not_found_mentions_fill_crop_and_legacy_rotation() {
+    fn header_not_found_does_not_claim_definite_absence() {
         let message = CoreError::HeaderNotFound.to_string();
-        assert!(message.contains("铺满裁切"));
-        assert!(message.contains("一级高频"));
+        assert!(message.contains("可能"));
+        assert!(message.contains("深入恢复"));
     }
 }

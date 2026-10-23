@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cleanProject } from "./clean.mjs";
 import { applyRustToolchainToProcessEnv } from "./rust-env.mjs";
 import {
   removeDevelopmentTauriConfig,
@@ -26,11 +25,8 @@ async function main() {
   // 直接 `npm run tauri -- dev` 会绕过 tauri-dev.mjs；这里同样补 PATH，避免 Tauri CLI 找不到 cargo。
   // Direct `npm run tauri -- dev` bypasses tauri-dev.mjs; restoring PATH here keeps the Tauri CLI able to find cargo.
   applyRustToolchainToProcessEnv();
-  if ((command === "build" || command === "dev") && process.env.PWC_SKIP_CLEAN !== "1") {
-    // 通用 Tauri 入口也执行全量清理，是为了覆盖用户直接运行 `npm run tauri -- build/dev` 而绕过项目专用包装脚本的情况。
-    // The generic Tauri entry also performs a full clean so direct `npm run tauri -- build/dev` calls cannot bypass the project wrappers.
-    cleanProject("all");
-  }
+  // Cargo 和 Vite 自行跟踪输入变化，普通启动保留缓存以避免重复编译全部依赖。
+  // Cargo and Vite track changed inputs, so normal launches preserve caches instead of recompiling every dependency.
 
   const args = [...originalArgs];
   const childEnv = { ...process.env };

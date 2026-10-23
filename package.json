@@ -1,6 +1,6 @@
 {
   "name": "privacy-watermark-codec",
-  "version": "0.2.7",
+  "version": "0.2.12",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,9 +8,7 @@
     "clean:frontend": "node scripts/clean.mjs frontend",
     "clean:rust": "node scripts/clean.mjs rust",
     "clean:release": "node scripts/clean.mjs release",
-    "predev": "npm run clean:frontend",
     "dev": "vite",
-    "prebuild": "npm run clean:frontend",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "node scripts/tauri-cli.mjs",
@@ -84,7 +82,9 @@
     "tauri:build:linux:appimage:prefetch:arm64": "node scripts/appimage-prefetch.mjs --target aarch64-unknown-linux-gnu",
     "linux:appimage:prefetch": "node scripts/appimage-prefetch.mjs",
     "linux:appimage:prefetch:x64": "node scripts/appimage-prefetch.mjs --target x86_64-unknown-linux-gnu",
-    "linux:appimage:prefetch:arm64": "node scripts/appimage-prefetch.mjs --target aarch64-unknown-linux-gnu"
+    "linux:appimage:prefetch:arm64": "node scripts/appimage-prefetch.mjs --target aarch64-unknown-linux-gnu",
+    "test:frontend": "node --test scripts/frontend-state.test.mjs",
+    "test:ui": "node scripts/ui-check.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

@@ -16,12 +16,13 @@ This project was implemented with AI-assisted programming. Before public release
 - Decodes watermarked images and videos.
 - Supports independent keys, one shared batch key, and custom-password mode.
 - Uses PBKDF2-HMAC-SHA256 for key derivation and ChaCha20-Poly1305 for encrypted payloads.
-- Uses a three-level Haar-pyramid DWT-QIM profile with coarse-scale directional detail coefficients for newly encoded media, retains the legacy one-level high-frequency profile for historical files, and combines balanced absolute-coordinate routing, BCH error/erasure recovery, geometric registration, and encrypted video timeline identities to resist occlusion, crop, transform, and frame-sequence attacks.
+- New encoding uses three-level Haar-pyramid DWT-QIM with interleaved BCH codewords. Historical DWT-QIM profiles, DCT files, and existing keys remain readable. Interleaving spreads crop losses across codewords; recovery still requires a validated full header and authenticated encrypted payload.
 - Uses O(n log n) timeline sequence alignment during video decoding to report inserted, deleted, replaced, duplicated, and out-of-order frames with actual/original frame ranges.
-- Shows live geometry-recovery progress and uses soft public-header correlation with coarse-to-fine continuous searches for fractional rotations through ±20°, high-precision 0.25×–4× resize correction, and ranked rotation/scale combinations.
+- Standard recovery has a 10-second budget; individual failures can be retried with a 60-second deep budget. Padding boundaries, block spectra from separated windows, pixel phase, and origin constraints guide recovery. Timeouts, missing validated headers, damaged payloads, and credential errors are distinct. See the actual passes and failures in [VALIDATION.md](VALIDATION.md); arbitrary resampling is not guaranteed to survive.
 - Reports global tamper status and suspicious regions from perceptual fingerprints.
 - Scans unknown images for this project watermark header and common privacy or AI metadata traces.
-- Provides Chinese and English UI text.
+- Provides Chinese and English UI text, shared task progress across tabs, confirmed cancellation, removable imported files, and 50 results per page.
+- An independent periodic synchronization pilot is implemented experimentally and remains disabled by default because independent recovery tests did not pass. Quality and authentication gates are unchanged. New encodes require the updated reader; historical encodes remain supported.
 - Every “Choose…” area supports both clicking and native drag-and-drop; media folders are recursively filtered and appended, while output-folder and key zones validate the dropped path type.
 - Adds grouped Windows image context-menu actions when installed through the Windows installer.
 
@@ -149,7 +150,7 @@ npm run clean:release
 
 The default cleanup removes frontend `dist`/Vite caches, Cargo `target` directories, Tauri temporary directories, and the `release` package directory. It preserves `node_modules` and the bundled media tools under `src-tauri/vendor/ffmpeg`.
 
-`npm run dev`, `npm run build`, `npm run desktop:dev`, `npm run desktop:build`, `npm run tauri:dev`, every `desktop:build:*`/`tauri:build:*` command, and direct `npm run tauri -- dev/build` calls clean automatically before compilation. Direct `cargo build` or `cargo test` commands do not pass through npm lifecycle hooks, so run `npm run clean` first; the GitHub Actions workflow already includes that step explicitly.
+Development, frontend builds, and Tauri builds preserve incremental caches instead of cleaning Cargo before every compilation. Release scripts only prepare distribution output. Use the explicit clean commands above when needed; `cargo build` and `cargo test` do not require a clean first.
 
 ## Development
 
@@ -165,7 +166,7 @@ Start the desktop app in development mode:
 npm run desktop:dev
 ```
 
-`npm run desktop:dev` is the recommended desktop development entry point. `npm run tauri:dev` remains available with identical behavior for compatibility. Both commands perform a full clean, run environment preflight checks, generate the FFmpeg manifest, and then start Tauri.
+`npm run desktop:dev` is the recommended desktop development entry point. `npm run tauri:dev` remains available with identical behavior for compatibility. Both commands preserve build caches, run environment preflight checks, generate the FFmpeg manifest, and then start Tauri.
 
 The desktop launcher prefers `127.0.0.1:1420`. If that port is occupied or belongs to a Windows/Hyper-V excluded-port range, the launcher probes for a bindable port and uses a Tauri runtime configuration to synchronize the same address with both Vite and the WebView. The terminal prints the selected development URL, so `vite.config.ts` and `tauri.conf.json` do not need manual edits. Standalone `npm run dev` also allows Vite to choose another available port.
 
@@ -349,7 +350,7 @@ This fallback prevents installed Linux packages from exiting before the WebView 
 2. Click to choose encoded media, or drop files/folders onto the media zone to append them.
 3. Click to choose or drop a `.key`/JSON key file, or enter the original custom password.
 4. Start decoding and inspection.
-5. Review extracted text, tamper status, and suspicious regions.
+5. Review extracted text, tamper status, and suspicious regions. Retry an individual recovery failure with deep recovery; expand technical details separately.
 
 ### Scan
 
@@ -360,6 +361,8 @@ This fallback prevents installed Linux packages from exiting before the WebView 
 A positive project-header scan means an encrypted project watermark may be present. It does not reveal watermark text without the key or password. A negative scan result is not proof that the image is watermark-free.
 
 ## Current validation status
+
+The sample-by-sample results and test scope for this change are in [VALIDATION.md](VALIDATION.md). Other platform entries below describe earlier validation and do not mean they were repeated for this change.
 
 | Platform                   | Current status                                 | Notes                                                                                                                                                                       |
 | -------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -404,3 +407,14 @@ npm run linux:desktop:cleanup
 ```
 
 If a system package was installed, refresh desktop caches or log out and back in.
+
+## Local regression checks
+
+```Shell
+cargo test --workspace --offline -- --test-threads=2
+npm run test:frontend
+npm run build
+cargo build --workspace --offline
+```
+
+Download dependencies before using offline commands for the first time. Geometry regressions use pinned ciphertext fixtures. Limited test concurrency prevents several wall-clock-bounded recoveries from competing for CPU; image batches in the app are sequential. Production encoding retains OS randomness. Every output must have actual PSNR strictly above 40 dB; this quality gate does not guarantee recovery after every attack.

@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    io::{Read, Write},
+    io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -120,7 +120,9 @@ fn get_ffmpeg_info_blocking(app: AppHandle) -> Result<FfmpegRuntimeInfo, String>
         })
         .filter(|text| !text.trim().is_empty())
         .or_else(|| read_resource_text(&app, "vendor/ffmpeg/LICENSE.txt").ok())
-        .unwrap_or_else(|| "未找到 FFmpeg 许可证文本。请保留发行包附带的 LICENSE/COPYING 文件。".into());
+        .unwrap_or_else(|| {
+            "未找到 FFmpeg 许可证文本。请保留发行包附带的 LICENSE/COPYING 文件。".into()
+        });
 
     Ok(FfmpegRuntimeInfo {
         platform,
@@ -144,7 +146,8 @@ fn load_manifest(app: &AppHandle) -> Result<FfmpegManifest, String> {
 
 fn read_resource_text(app: &AppHandle, resource: &str) -> Result<String, String> {
     let path = resolve_existing_resource_path(app, resource)?;
-    fs::read_to_string(&path).map_err(|error| format!("无法读取资源文件 {}：{error}", path.display()))
+    fs::read_to_string(&path)
+        .map_err(|error| format!("无法读取资源文件 {}：{error}", path.display()))
 }
 
 fn verified_binary_path(
@@ -278,7 +281,10 @@ fn materialize_encoded_binary(
     let output_path = output_dir.join(&manifest.file);
 
     if is_regular_file(&output_path) {
-        if let (Ok(()), Ok(actual)) = (validate_expected_hash(&manifest.file, &manifest.sha256), sha256_file(&output_path)) {
+        if let (Ok(()), Ok(actual)) = (
+            validate_expected_hash(&manifest.file, &manifest.sha256),
+            sha256_file(&output_path),
+        ) {
             if actual == manifest.sha256.to_lowercase() {
                 ensure_binary_executable(&output_path)?;
                 return Ok(output_path);
@@ -286,24 +292,27 @@ fn materialize_encoded_binary(
         }
     }
 
-    let encoded = fs::read(encoded_path)
-        .map_err(|error| format!("无法读取 AppImage FFmpeg 编码资源 {}：{error}", encoded_path.display()))?;
-    if !encoded.starts_with(ENCODED_FFMPEG_MAGIC) {
+    let encoded = fs::File::open(encoded_path).map_err(|error| {
+        format!(
+            "无法读取 AppImage FFmpeg 编码资源 {}：{error}",
+            encoded_path.display()
+        )
+    })?;
+    let temporary_path = output_dir.join(format!("{}.tmp-{}", manifest.file, std::process::id()));
+    let output = fs::File::create(&temporary_path).map_err(|error| {
+        format!(
+            "无法创建 FFmpeg 临时文件 {}：{error}",
+            temporary_path.display()
+        )
+    })?;
+    let decoded = restore_encoded_bytes(BufReader::new(encoded), BufWriter::new(output));
+    if let Err(error) = decoded {
+        let _ = fs::remove_file(&temporary_path);
         return Err(format!(
-            "AppImage FFmpeg 编码资源格式不正确：{}",
+            "无法还原 FFmpeg 资源 {}：{error}",
             encoded_path.display()
         ));
     }
-
-    let temporary_path = output_dir.join(format!("{}.tmp-{}", manifest.file, std::process::id()));
-    let mut output = fs::File::create(&temporary_path)
-        .map_err(|error| format!("无法创建 FFmpeg 临时文件 {}：{error}", temporary_path.display()))?;
-    for byte in &encoded[ENCODED_FFMPEG_MAGIC.len()..] {
-        output
-            .write_all(&[*byte ^ ENCODED_FFMPEG_XOR_KEY])
-            .map_err(|error| format!("无法写入 FFmpeg 临时文件 {}：{error}", temporary_path.display()))?;
-    }
-    drop(output);
     ensure_binary_executable(&temporary_path)?;
 
     // AppImage 打包时把 FFmpeg 资源编码为非 ELF 文件，是为了阻止 linuxdeploy 对大型预编译 FFmpeg 反复 patchelf 导致失败；运行时再还原到用户可写缓存。
@@ -326,6 +335,47 @@ fn materialize_encoded_binary(
     Ok(output_path)
 }
 
+fn restore_encoded_bytes(mut input: impl Read, mut output: impl Write) -> std::io::Result<()> {
+    let mut magic = vec![0_u8; ENCODED_FFMPEG_MAGIC.len()];
+    input.read_exact(&mut magic)?;
+    if magic != ENCODED_FFMPEG_MAGIC {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "FFmpeg 编码资源格式不正确",
+        ));
+    }
+    let mut buffer = [0_u8; 64 * 1024];
+    // 分块异或保持现有资源格式，同时避免整文件驻留内存和逐字节系统调用拖慢首次启动。
+    // Chunked XOR preserves the existing resource format while avoiding whole-file memory use and per-byte system calls during first launch.
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        for byte in &mut buffer[..count] {
+            *byte ^= ENCODED_FFMPEG_XOR_KEY;
+        }
+        output.write_all(&buffer[..count])?;
+    }
+    output.flush()
+}
+
+#[cfg(test)]
+mod encoded_resource_tests {
+    use super::*;
+
+    #[test]
+    fn restores_multiple_chunks_and_rejects_invalid_header() {
+        let original: Vec<u8> = (0..150_003).map(|index| (index % 251) as u8).collect();
+        let mut encoded = ENCODED_FFMPEG_MAGIC.to_vec();
+        encoded.extend(original.iter().map(|byte| byte ^ ENCODED_FFMPEG_XOR_KEY));
+        let mut restored = Vec::new();
+        restore_encoded_bytes(encoded.as_slice(), &mut restored).unwrap();
+        assert_eq!(restored, original);
+        assert!(restore_encoded_bytes(&b"invalid"[..], Vec::new()).is_err());
+    }
+}
+
 fn resolve_existing_resource_path(app: &AppHandle, resource: &str) -> Result<PathBuf, String> {
     let candidates = candidate_resource_paths(app, resource);
     for candidate in &candidates {
@@ -341,7 +391,9 @@ fn resolve_existing_resource_path(app: &AppHandle, resource: &str) -> Result<Pat
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join("\n- ");
-    Err(format!("未找到资源文件 {resource}。已检查路径：\n- {joined}"))
+    Err(format!(
+        "未找到资源文件 {resource}。已检查路径：\n- {joined}"
+    ))
 }
 
 fn candidate_resource_paths(app: &AppHandle, resource: &str) -> Vec<PathBuf> {
@@ -368,7 +420,11 @@ fn candidate_resource_paths(app: &AppHandle, resource: &str) -> Vec<PathBuf> {
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("vendor").join(resource.strip_prefix("vendor/").unwrap_or(resource)));
+            candidates.push(
+                exe_dir
+                    .join("vendor")
+                    .join(resource.strip_prefix("vendor/").unwrap_or(resource)),
+            );
             candidates.push(exe_dir.join("resources").join(resource));
             candidates.push(exe_dir.join(resource));
             if let Some(parent) = exe_dir.parent() {
@@ -500,7 +556,9 @@ fn platform_key_candidates() -> Result<Vec<&'static str>, String> {
     Ok(candidates)
 }
 
-fn resolve_platform_entry<'a>(manifest: &'a FfmpegManifest) -> Result<(&'static str, &'a PlatformManifest), String> {
+fn resolve_platform_entry<'a>(
+    manifest: &'a FfmpegManifest,
+) -> Result<(&'static str, &'a PlatformManifest), String> {
     let candidates = platform_key_candidates()?;
 
     for platform in &candidates {

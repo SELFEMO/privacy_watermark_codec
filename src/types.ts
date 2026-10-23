@@ -38,6 +38,7 @@ export interface DecodeRequest {
   customPassword?: string;
   frameParallelism?: number;
   taskId?: string;
+  recoveryMode?: "standard" | "deep";
 }
 
 export interface TamperRegion {
@@ -56,6 +57,8 @@ export interface SyncRegistration {
   translationX: number;
   translationY: number;
   score: number;
+  shearX?: number;
+  mirrored?: boolean;
 }
 
 
@@ -79,6 +82,7 @@ export interface DecodeItemResult {
   inputPath: string;
   succeeded: boolean;
   error?: string;
+  errorCode?: "header_not_found" | "recovery_timeout" | "authentication_failed" | "payload_corrupted" | "cancelled" | "invalid_input" | "other";
   mediaType: "image" | "video";
   text: string;
   integrity: "intact" | "uncertain" | "modified";

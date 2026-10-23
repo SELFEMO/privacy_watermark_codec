@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use watermark_core::{IntegrityStatus, KeyMode, PrivacyScanDetection, PrivacyScanStatus, SyncRegistration, TamperRegion};
+use watermark_core::{
+    IntegrityStatus, KeyMode, PrivacyScanDetection, PrivacyScanStatus, SyncRegistration,
+    TamperRegion,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,9 +49,9 @@ pub struct DecodeRequest {
     pub key_files: Option<Vec<String>>,
     pub custom_password: Option<String>,
     pub frame_parallelism: Option<usize>,
+    pub recovery_mode: Option<watermark_core::RecoveryMode>,
     pub task_id: Option<String>,
 }
-
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -77,6 +80,8 @@ pub struct DecodeItemResult {
     pub input_path: String,
     pub succeeded: bool,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     pub media_type: MediaType,
     pub text: String,
     pub integrity: IntegrityStatus,
@@ -146,7 +151,6 @@ pub struct VerifyEvidenceRequest {
     pub key_file: Option<String>,
     pub custom_password: Option<String>,
 }
-
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -226,7 +230,6 @@ impl TaskProgressEvent {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,0 +1,56 @@
+[
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (2).png",
+    "status": "failed",
+    "seconds": 10.658,
+    "result": "failed elapsed=10.638s error=任务已取消 events=1898"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (3).png",
+    "status": "ok",
+    "seconds": 9.041,
+    "result": "ok elapsed=9.029s chars=7 integrity=Modified angle=180.00000 scale=1.0000000 events=2565"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (4).png",
+    "status": "failed",
+    "seconds": 10.924,
+    "result": "failed elapsed=10.916s error=任务已取消 events=2506"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (5).png",
+    "status": "failed",
+    "seconds": 11.018,
+    "result": "failed elapsed=11.008s error=任务已取消 events=2506"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (6).png",
+    "status": "failed",
+    "seconds": 10.009,
+    "result": "failed elapsed=10.001s error=任务已取消 events=3482"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (7).png",
+    "status": "failed",
+    "seconds": 10.011,
+    "result": "failed elapsed=10.001s error=任务已取消 events=2896"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (8).png",
+    "status": "ok",
+    "seconds": 0.196,
+    "result": "ok elapsed=0.189s chars=7 integrity=Modified angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked - 副本 (9).png",
+    "status": "ok",
+    "seconds": 2.449,
+    "result": "ok elapsed=2.442s chars=7 integrity=Modified angle=0.00000 scale=1.0000000 events=1"
+  },
+  {
+    "file": "ZQH_Momi_20250323_watermarked.png",
+    "status": "ok",
+    "seconds": 0.237,
+    "result": "ok elapsed=0.231s chars=7 integrity=Intact angle=0.00000 scale=1.0000000 events=1"
+  }
+]

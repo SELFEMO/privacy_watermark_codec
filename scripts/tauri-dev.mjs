@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cleanProject } from "./clean.mjs";
 import { applyRustToolchainToProcessEnv } from "./rust-env.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -18,9 +17,8 @@ async function main() {
   // 父进程先补 PATH，是因为 preflight 是子进程，它改环境变量传不回 npm/tauri。
   // The parent restores PATH first because preflight runs as a child and cannot push env changes back to npm/tauri.
   applyRustToolchainToProcessEnv();
-  // 开发编译也从干净状态启动，是为了让损坏的 Vite/Cargo 缓存不会伪装成业务代码问题。
-  // Development compilation also starts clean so corrupted Vite/Cargo caches cannot masquerade as application defects.
-  cleanProject("all");
+  // 保留增量编译缓存才能让日常启动快速完成；需要排除缓存问题时仍可显式运行 clean。
+  // Keeping incremental compilation caches makes everyday startup fast; explicit clean remains available for cache troubleshooting.
   await run(nodePath, [preflightScript]);
   await run(nodePath, [manifestScript]);
 

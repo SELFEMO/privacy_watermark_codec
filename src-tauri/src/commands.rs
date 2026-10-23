@@ -1,14 +1,15 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use chrono::Local;
 use tracing::{error, info};
 use watermark_core::{
-    embed_image_file_with_auto_strength, extract_image_file_with_progress, scan_image_file,
+    embed_image_file_with_auto_strength, extract_image_file_with_recovery, scan_image_file,
     CoreError, EmbedOptions, ExtractOptions, IntegrityStatus, KeyFile, KeyMode, KeySource,
-    PrivacyScanStatus, WatermarkKey,
+    PrivacyScanStatus, RecoveryOptions, WatermarkKey,
 };
 
 use crate::{
@@ -17,9 +18,9 @@ use crate::{
     media::{detect_media_type, safe_stem},
     models::{
         CancelTaskRequest, DecodeItemEvent, DecodeItemResult, DecodeRequest, DecodeResponse,
-        EncodeItemResult, EncodeRequest, EncodeResponse, MediaType, ProgressUnitKind, ScanItemResult,
-        ScanRequest, ScanResponse, TaskOutcome, TaskProgressEvent, TaskProgressKind,
-        VerifyEvidenceRequest,
+        EncodeItemResult, EncodeRequest, EncodeResponse, MediaType, ProgressUnitKind,
+        ScanItemResult, ScanRequest, ScanResponse, TaskOutcome, TaskProgressEvent,
+        TaskProgressKind, VerifyEvidenceRequest,
     },
     progress::{
         batch_percent, clamp_percent, decode_geometry_file_fraction, emit_decode_item,
@@ -60,9 +61,11 @@ pub async fn scan_privacy_watermark(
     request: ScanRequest,
 ) -> Result<ScanResponse, String> {
     let registry = cancellation.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || scan_privacy_watermark_blocking(app, request, registry))
-        .await
-        .map_err(|error| format!("后台任务异常终止：{error}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        scan_privacy_watermark_blocking(app, request, registry)
+    })
+    .await
+    .map_err(|error| format!("后台任务异常终止：{error}"))?
 }
 
 #[tauri::command]
@@ -79,7 +82,11 @@ pub fn verify_evidence_manifest_cmd(
     request: VerifyEvidenceRequest,
 ) -> Result<crate::evidence::EvidenceVerifyResult, String> {
     let path = PathBuf::from(&request.manifest_path);
-    let Some(key_file) = request.key_file.as_deref().filter(|value| !value.is_empty()) else {
+    let Some(key_file) = request
+        .key_file
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
         return Err("请提供密钥文件以核验证据".into());
     };
     let key = KeyFile::read(Path::new(key_file))
@@ -383,7 +390,11 @@ fn encode_media_blocking(
                     task_id.clone(),
                     TaskProgressKind::Encode,
                     "completed-file",
-                    format!("第 {}/{} 个文件编码失败，已继续处理后续文件", file_index + 1, total_files),
+                    format!(
+                        "第 {}/{} 个文件编码失败，已继续处理后续文件",
+                        file_index + 1,
+                        total_files
+                    ),
                     file_index,
                     total_files,
                     1.0,
@@ -400,8 +411,13 @@ fn encode_media_blocking(
     } else if files_succeeded > 0 {
         let path = output_root.join("batch_evidence_manifest.json");
         let signing_key = shared_key.as_ref().unwrap();
-        write_evidence_manifest(&path, batch_entries, signing_key, current_release_metadata())
-            .map_err(|error| error.to_string())?;
+        write_evidence_manifest(
+            &path,
+            batch_entries,
+            signing_key,
+            current_release_metadata(),
+        )
+        .map_err(|error| error.to_string())?;
         Some(path)
     } else {
         None
@@ -444,7 +460,11 @@ fn encode_media_blocking(
             unit_label: None,
         },
     );
-    info!(completed = files_succeeded, failed = files_failed, "批量编码任务结束");
+    info!(
+        completed = files_succeeded,
+        failed = files_failed,
+        "批量编码任务结束"
+    );
     Ok(EncodeResponse {
         output_root: output_root.display().to_string(),
         items,
@@ -501,7 +521,10 @@ fn scan_privacy_watermark_blocking(
             failed_scan_item(&input, format!("输入文件不存在：{}", input.display()))
         } else if detect_media_type(&input) != Some(MediaType::Image) {
             files_failed += 1;
-            failed_scan_item(&input, format!("未知来源隐私水印扫描当前仅支持图片：{}", input.display()))
+            failed_scan_item(
+                &input,
+                format!("未知来源隐私水印扫描当前仅支持图片：{}", input.display()),
+            )
         } else {
             match scan_image_file(&input) {
                 Ok(report) => {
@@ -537,7 +560,9 @@ fn scan_privacy_watermark_blocking(
         );
     }
 
-    emit_progress(
+    // 扫描完成事件也携带统计，才能让界面正确区分全部成功、部分失败与全失败。
+    // Scan completion includes counts so the UI can distinguish full success, partial failure, and complete failure.
+    emit_progress_detailed(
         &app,
         task_id,
         TaskProgressKind::Scan,
@@ -551,12 +576,30 @@ fn scan_privacy_watermark_blocking(
         } else {
             "未知来源图片扫描完成"
         },
-        total_files,
-        total_files,
-        100.0,
-        None,
+        ProgressDetail {
+            current: total_files,
+            total: total_files,
+            percent: 100.0,
+            current_path: None,
+            outcome: if files_failed > 0 {
+                TaskOutcome::CompletedWithErrors
+            } else {
+                TaskOutcome::Completed
+            },
+            file_fraction: Some(1.0),
+            files_succeeded: Some(files_succeeded),
+            files_failed: Some(files_failed),
+            unit_kind: Some(ProgressUnitKind::File),
+            unit_current: None,
+            unit_total: None,
+            unit_label: None,
+        },
     );
-    info!(completed = files_succeeded, failed = files_failed, "未知来源图片隐私水印扫描完成");
+    info!(
+        completed = files_succeeded,
+        failed = files_failed,
+        "未知来源图片隐私水印扫描完成"
+    );
     Ok(ScanResponse { items })
 }
 
@@ -570,6 +613,7 @@ fn decode_media_blocking(
     }
     let key_source = build_key_source(&request)?;
     let video_options = video_options_from_request(request.frame_parallelism);
+    let recovery_mode = request.recovery_mode.unwrap_or_default();
     let task_id = request.task_id.clone();
     let total_files = request.input_paths.len();
     let cancellation = CancellationToken::new(task_id.clone(), cancellation);
@@ -593,11 +637,16 @@ fn decode_media_blocking(
     for (file_index, input_string) in request.input_paths.iter().enumerate() {
         cancellation.check()?;
         let input = PathBuf::from(input_string);
-        if !input.is_file() {
-            return Err(format!("输入文件不存在：{}", input.display()));
-        }
-        let media_type = detect_media_type(&input)
-            .ok_or_else(|| format!("不支持的文件类型：{}", input.display()))?;
+        let detected_media_type = detect_media_type(&input);
+        let input_error = if !input.is_file() {
+            Some(format!("输入文件不存在：{}", input.display()))
+        } else if detected_media_type.is_none() {
+            Some(format!("不支持的文件类型：{}", input.display()))
+        } else {
+            None
+        };
+        let media_type = detected_media_type.unwrap_or(MediaType::Image);
+        let mut error_code = input_error.as_ref().map(|_| "invalid_input".to_owned());
         emit_file_progress(
             &app,
             task_id.clone(),
@@ -611,31 +660,45 @@ fn decode_media_blocking(
         );
         cancellation.check()?;
 
-        let item_result: Result<DecodeItemResult, String> = match media_type {
-            MediaType::Image => {
-                emit_file_progress(
-                    &app,
-                    task_id.clone(),
-                    TaskProgressKind::Decode,
-                    "decoding-image",
-                    format!("正在解码并检测图片：{}", input.display()),
-                    file_index,
-                    total_files,
-                    0.50,
-                    &input,
-                );
-                cancellation.check()?;
-                extract_image_file_with_progress(
+        // 单个失效路径仍产生独立失败结果，避免批次其余文件失去处理机会。
+        // An invalid path gets its own failure result so remaining batch files still receive processing.
+        let item_result: Result<DecodeItemResult, String> = if let Some(error) = input_error {
+            Err(error)
+        } else {
+            match media_type {
+                MediaType::Image => {
+                    emit_file_progress(
+                        &app,
+                        task_id.clone(),
+                        TaskProgressKind::Decode,
+                        "decoding-image",
+                        format!("正在解码并检测图片：{}", input.display()),
+                        file_index,
+                        total_files,
+                        0.50,
+                        &input,
+                    );
+                    cancellation.check()?;
+                    let mut last_emit = Instant::now() - Duration::from_secs(1);
+                    let mut last_stage = "";
+                    extract_image_file_with_recovery(
                     &input,
                     &key_source,
                     ExtractOptions::default(),
+                    RecoveryOptions {
+                        mode: recovery_mode,
+                        cancellation: Some(cancellation.callback()),
+                        max_duration: None,
+                    },
                     |search| {
                         cancellation.check().map_err(|_| CoreError::Cancelled)?;
                         // 全图插值中的静默检查只负责让取消及时生效，避免每 64 行向前端发送重复进度事件造成新的界面负担。
                         // Silent checkpoints during full-image interpolation exist only for responsive cancellation, avoiding duplicate frontend events every 64 rows that would create new UI overhead.
-                        if !search.should_emit {
-                            return Ok(());
-                        }
+                        if !search.should_emit { return Ok(()); }
+                        // 取消先于事件节流检查，避免为减少 IPC 而牺牲停止响应；阶段切换立即发送。
+                        // Cancellation is checked before event throttling so reduced IPC never delays stopping; stage transitions are emitted immediately.
+                        if search.stage == last_stage && last_emit.elapsed() < Duration::from_millis(100) { return Ok(()); }
+                        last_emit=Instant::now(); last_stage=search.stage;
                         let file_fraction = decode_geometry_file_fraction(
                             search.stage,
                             search.current,
@@ -738,6 +801,7 @@ fn decode_media_blocking(
                     input_path: input.display().to_string(),
                     succeeded: true,
                     error: None,
+                    error_code: None,
                     media_type,
                     text: report.text,
                     integrity: report.integrity,
@@ -761,59 +825,70 @@ fn decode_media_blocking(
                 })
                 .map_err(|error| {
                     error!(input = %input.display(), %error, "图片解码失败");
+                    error_code = Some(decode_error_code(&error).into());
                     error.to_string()
                 })
+                }
+                MediaType::Video => decode_video(
+                    &app,
+                    &input,
+                    &key_source,
+                    video_options,
+                    recovery_mode,
+                    &cancellation,
+                    VideoProgressContext {
+                        task_id: task_id.clone(),
+                        task: TaskProgressKind::Decode,
+                        file_index,
+                        file_total: total_files,
+                        file_path: input.display().to_string(),
+                    },
+                )
+                .map(|report| DecodeItemResult {
+                    input_path: input.display().to_string(),
+                    succeeded: true,
+                    error: None,
+                    error_code: None,
+                    media_type,
+                    text: report.text,
+                    integrity: report.integrity,
+                    fingerprint_distance: None,
+                    corrected_codewords: report.corrected_codewords,
+                    frame_count: Some(report.frame_count),
+                    expected_frame_count: report.expected_frame_count,
+                    valid_frames: Some(report.valid_frames),
+                    modified_frames: Some(report.modified_frames),
+                    missing_frames: Some(report.missing_frames),
+                    inserted_frames: Some(report.inserted_frames),
+                    deleted_frames: Some(report.deleted_frames),
+                    duplicate_frames: Some(report.duplicate_frames),
+                    out_of_order_frames: Some(report.out_of_order_frames),
+                    replaced_frames: Some(report.replaced_frames),
+                    unreadable_frames: Some(report.unreadable_frames),
+                    transformed_frames: Some(report.transformed_frames),
+                    timeline_anomalies: report.timeline_anomalies,
+                    tamper_regions: report.tamper_regions,
+                    sync_registration: report.sync_registration,
+                })
+                .map_err(|error| {
+                    error!(input = %input.display(), %error, "视频解码失败");
+                    if error == CoreError::RecoveryTimeout.to_string() {
+                        error_code = Some("recovery_timeout".into());
+                    } else if error == CoreError::Cancelled.to_string() {
+                        error_code = Some("cancelled".into());
+                    }
+                    error
+                }),
             }
-            MediaType::Video => decode_video(
-                &app,
-                &input,
-                &key_source,
-                video_options,
-                &cancellation,
-                VideoProgressContext {
-                    task_id: task_id.clone(),
-                    task: TaskProgressKind::Decode,
-                    file_index,
-                    file_total: total_files,
-                    file_path: input.display().to_string(),
-                },
-            )
-            .map(|report| DecodeItemResult {
-                input_path: input.display().to_string(),
-                succeeded: true,
-                error: None,
-                media_type,
-                text: report.text,
-                integrity: report.integrity,
-                fingerprint_distance: None,
-                corrected_codewords: report.corrected_codewords,
-                frame_count: Some(report.frame_count),
-                expected_frame_count: report.expected_frame_count,
-                valid_frames: Some(report.valid_frames),
-                modified_frames: Some(report.modified_frames),
-                missing_frames: Some(report.missing_frames),
-                inserted_frames: Some(report.inserted_frames),
-                deleted_frames: Some(report.deleted_frames),
-                duplicate_frames: Some(report.duplicate_frames),
-                out_of_order_frames: Some(report.out_of_order_frames),
-                replaced_frames: Some(report.replaced_frames),
-                unreadable_frames: Some(report.unreadable_frames),
-                transformed_frames: Some(report.transformed_frames),
-                timeline_anomalies: report.timeline_anomalies,
-                tamper_regions: report.tamper_regions,
-                sync_registration: report.sync_registration,
-            })
-            .map_err(|error| {
-                error!(input = %input.display(), %error, "视频解码失败");
-                error
-            }),
         };
 
         // 单个文件的水印损坏、密钥不匹配或格式异常不应中止整批任务；保留失败条目后继续，用户才能看到每一张图片的独立结论。
         // A damaged watermark, mismatched key, or malformed file must not abort the whole batch; retaining a failed item and continuing gives every image an independent outcome.
         let succeeded = item_result.is_ok();
         let result = item_result.unwrap_or_else(|error| {
-            failed_decode_item(&input, media_type, error)
+            let mut item = failed_decode_item(&input, media_type, error);
+            item.error_code = error_code.or_else(|| Some("other".into()));
+            item
         });
         // 结果事件在加入最终集合的同一位置发送，是为了保证前端流式顺序与命令最终返回顺序完全一致，避免快速任务出现重复或跳项。
         // The item event is emitted at the same point it enters the final collection so frontend streaming order exactly matches the command's final response, avoiding duplicates or gaps in fast batches.
@@ -841,7 +916,11 @@ fn decode_media_blocking(
             if succeeded {
                 format!("第 {}/{} 个文件解码检测完成", file_index + 1, total_files)
             } else {
-                format!("第 {}/{} 个文件检测失败，已继续处理后续文件", file_index + 1, total_files)
+                format!(
+                    "第 {}/{} 个文件检测失败，已继续处理后续文件",
+                    file_index + 1,
+                    total_files
+                )
             },
             (file_index + 1).min(total_files.max(1)),
             total_files.max(1),
@@ -916,11 +995,30 @@ fn failed_scan_item(input: &Path, error: String) -> ScanItemResult {
     }
 }
 
+fn decode_error_code(error: &CoreError) -> &'static str {
+    // 稳定错误码把重试入口与翻译文案解耦，超时也不会被误报成确定没有水印。
+    // Stable error codes decouple retry controls from translated messages and prevent timeouts from being reported as a definite absence of watermarks.
+    match error {
+        CoreError::HeaderNotFound => "header_not_found",
+        CoreError::RecoveryTimeout => "recovery_timeout",
+        CoreError::PayloadCorrupted => "payload_corrupted",
+        CoreError::SaltMismatch | CoreError::DecryptionFailed => "authentication_failed",
+        CoreError::Cancelled => "cancelled",
+        CoreError::InvalidArgument(_)
+        | CoreError::InvalidKeyFile(_)
+        | CoreError::ImageOpen { .. }
+        | CoreError::ImageTooSmall
+        | CoreError::ImageTooLarge => "invalid_input",
+        _ => "other",
+    }
+}
+
 fn failed_decode_item(input: &Path, media_type: MediaType, error: String) -> DecodeItemResult {
     DecodeItemResult {
         input_path: input.display().to_string(),
         succeeded: false,
         error: Some(error),
+        error_code: Some("other".into()),
         media_type,
         text: String::new(),
         integrity: IntegrityStatus::Uncertain,
@@ -1084,7 +1182,11 @@ fn validate_encode_request(request: &EncodeRequest) -> Result<(), String> {
 
 fn build_key_source(request: &DecodeRequest) -> Result<KeySource, String> {
     let mut paths = request.key_files.clone().unwrap_or_default();
-    if let Some(path) = request.key_file.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(path) = request
+        .key_file
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         paths.push(path.to_owned());
     }
     paths.retain(|path| !path.trim().is_empty());
@@ -1094,9 +1196,10 @@ fn build_key_source(request: &DecodeRequest) -> Result<KeySource, String> {
     if !paths.is_empty() {
         let mut key_files = Vec::with_capacity(paths.len());
         for path in paths {
-            key_files.push(KeyFile::read(Path::new(&path)).map_err(|error| {
-                format!("读取密钥文件失败（{path}）：{error}")
-            })?);
+            key_files.push(
+                KeyFile::read(Path::new(&path))
+                    .map_err(|error| format!("读取密钥文件失败（{path}）：{error}"))?,
+            );
         }
         // 多个独立密钥一次载入后由核心按公开头 salt 自动匹配，既支持乱序批量导入，也避免为每张图片重复扫描所有密钥文件。
         // Loading independent keys once and matching them by public-header salt supports unordered batch imports and avoids rereading every key file for every image.
@@ -1106,7 +1209,11 @@ fn build_key_source(request: &DecodeRequest) -> Result<KeySource, String> {
             KeySource::KeyFiles(key_files)
         });
     }
-    if let Some(password) = request.custom_password.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(password) = request
+        .custom_password
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         return Ok(KeySource::CustomPassword(password.to_owned()));
     }
     Err("请选择一个或多个 .key 文件，或输入自定义密码".into())

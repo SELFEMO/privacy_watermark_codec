@@ -43,6 +43,11 @@ pub fn decode_bits_with_erasures(
         .chunks_exact(CODEWORD_BITS)
         .zip(erasures[..required_bits].chunks_exact(CODEWORD_BITS))
     {
+        // 按码字检查停止状态，使大型正文纠错也服从同一次请求的截止时间和取消信号。
+        // Check each codeword so correction of a large payload obeys the same request deadline and cancellation signal.
+        if crate::recovery::stopped() {
+            return None;
+        }
         let (word, changed) = decode_codeword(bit_chunk, erasure_chunk)?;
         corrected_codewords += usize::from(changed);
         let data = (word >> PARITY_BITS) as u16;
@@ -61,8 +66,109 @@ pub fn encoded_bit_len(byte_len: usize) -> usize {
     ((byte_len + 1) / 2) * CODEWORD_BITS
 }
 
+pub(crate) fn erasure_candidates(
+    bits: &[bool],
+    observed: &[bool],
+    reliability: &[f32],
+    output_len: usize,
+) -> Vec<DecodeOutcome> {
+    static CODEBOOK: OnceLock<Vec<u32>> = OnceLock::new();
+    let count = encoded_bit_len(output_len);
+    if bits.len() < count || observed.len() < count || reliability.len() < count || output_len > 512
+    {
+        return Vec::new();
+    }
+    let missing = observed[..count].iter().filter(|value| !**value).count();
+    if missing == 0 || missing * 10 > count * 4 {
+        return Vec::new();
+    }
+    let book = CODEBOOK.get_or_init(|| (0..=u16::MAX).map(encode_word).collect());
+    let mut paths = vec![(Vec::new(), 0.0_f32)];
+    // 超过唯一擦除纠正界限时按软置信度保留有限候选，最终必须通过载荷 CRC 和 AEAD，不能把歧义列表当成已解出的正文。
+    // Beyond unique erasure correction, retain a bounded confidence-ranked list; payload CRC and AEAD must resolve it before any text is accepted.
+    for (word_index, (word_bits, word_observed)) in bits[..count]
+        .chunks_exact(31)
+        .zip(observed[..count].chunks_exact(31))
+        .enumerate()
+    {
+        if crate::recovery::stopped() {
+            return Vec::new();
+        }
+        let received = word_bits
+            .iter()
+            .fold(0_u32, |word, bit| (word << 1) | u32::from(*bit));
+        let mask = word_observed
+            .iter()
+            .fold(0_u32, |word, bit| (word << 1) | u32::from(*bit));
+        let erasures: Vec<_> = word_observed.iter().map(|value| !value).collect();
+        let mut choices = Vec::new();
+        if let Some((word, _)) = decode_codeword(word_bits, &erasures) {
+            choices.push(((word >> 15) as u16, 0.0));
+        } else {
+            if mask.count_ones() < 16 {
+                return Vec::new();
+            }
+            for (data, &word) in book.iter().enumerate() {
+                let mut changed = (word ^ received) & mask;
+                if changed.count_ones() > 3 {
+                    continue;
+                }
+                let mut cost = 0.0;
+                while changed != 0 {
+                    let position = changed.trailing_zeros() as usize;
+                    cost += reliability[word_index * 31 + 30 - position].max(0.02);
+                    changed &= changed - 1;
+                }
+                choices.push((data as u16, cost));
+            }
+            choices.sort_by(|a, b| a.1.total_cmp(&b.1));
+            choices.truncate(4);
+        }
+        if choices.is_empty() {
+            return Vec::new();
+        }
+        let mut next = Vec::new();
+        for (path, cost) in &paths {
+            for (word, extra) in &choices {
+                let mut bytes = path.clone();
+                bytes.extend_from_slice(&word.to_be_bytes());
+                next.push((bytes, cost + extra));
+            }
+        }
+        // 有界束搜索限制最坏情况下的时间和内存，认证失败时返回失败而不是无限枚举。
+        // A bounded beam limits worst-case time and memory, returning failure instead of enumerating indefinitely when authentication cannot be achieved.
+        next.sort_by(|a, b| a.1.total_cmp(&b.1));
+        next.truncate(256);
+        paths = next;
+    }
+    let corrected = observed[..count]
+        .chunks(31)
+        .zip(bits[..count].chunks(31))
+        .filter(|(seen, values)| {
+            seen.iter().any(|value| !*value)
+                || polynomial_mod(
+                    values
+                        .iter()
+                        .fold(0_u32, |word, value| (word << 1) | u32::from(*value)),
+                ) != 0
+        })
+        .count();
+    paths
+        .into_iter()
+        .map(|(mut bytes, _)| {
+            bytes.truncate(output_len);
+            DecodeOutcome {
+                bytes,
+                corrected_codewords: corrected,
+            }
+        })
+        .collect()
+}
+
 fn decode_codeword(bits: &[bool], erasures: &[bool]) -> Option<(u32, bool)> {
-    let received = bits.iter().fold(0_u32, |value, bit| (value << 1) | u32::from(*bit));
+    let received = bits
+        .iter()
+        .fold(0_u32, |value, bit| (value << 1) | u32::from(*bit));
     let positions: Vec<usize> = erasures
         .iter()
         .enumerate()
@@ -95,16 +201,21 @@ fn decode_codeword(bits: &[bool], erasures: &[bool]) -> Option<(u32, bool)> {
         if polynomial_mod(corrected) != 0 {
             continue;
         }
-        let observed_mask = positions.iter().fold((1_u32 << CODEWORD_BITS) - 1, |mask, position| {
-            mask & !(1_u32 << position)
-        });
+        let observed_mask = positions
+            .iter()
+            .fold((1_u32 << CODEWORD_BITS) - 1, |mask, position| {
+                mask & !(1_u32 << position)
+            });
         let observed_changes = ((corrected ^ received) & observed_mask).count_ones() as usize;
         if observed_changes > ERROR_CORRECTION_LIMIT
             || observed_changes * 2 + positions.len() > ERROR_CORRECTION_LIMIT * 2
         {
             continue;
         }
-        if best.map(|(_, score)| observed_changes < score).unwrap_or(true) {
+        if best
+            .map(|(_, score)| observed_changes < score)
+            .unwrap_or(true)
+        {
             best = Some((corrected, observed_changes));
         }
     }
@@ -197,5 +308,21 @@ mod tests {
                 .bytes,
             input
         );
+    }
+
+    #[test]
+    fn lists_ambiguous_erasure_candidates_without_silently_accepting_one() {
+        let input = b"bounded erasure recovery";
+        let encoded = encode_bytes(input);
+        let mut observed = vec![true; encoded.len()];
+        for chunk in observed.chunks_mut(31) {
+            for bit in &mut chunk[..7] {
+                *bit = false;
+            }
+        }
+        let candidates =
+            erasure_candidates(&encoded, &observed, &vec![1.0; encoded.len()], input.len());
+        assert!(candidates.iter().any(|candidate| candidate.bytes == input));
+        assert!(candidates.len() <= 256);
     }
 }

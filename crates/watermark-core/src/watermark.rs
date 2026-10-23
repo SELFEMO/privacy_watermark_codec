@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cell::Cell,
     cmp::Ordering,
     path::Path,
@@ -10,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use image::{imageops, DynamicImage, GenericImageView, ImageFormat, Rgba, RgbaImage};
+use image::{imageops, DynamicImage, ImageFormat, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -29,6 +30,7 @@ use crate::{
         InnerPayload, LegacyHeader, RobustHeader, TemporalPayload, LEGACY_HEADER_BITS,
         ROBUST_HEADER_BITS, ROBUST_MAGIC, ROBUST_PILOT,
     },
+    recovery::{self, RecoveryOptions, RequestScope},
     sync::{self, SyncRegistration},
 };
 
@@ -42,7 +44,6 @@ const MIN_HEIGHT: u32 = 256;
 const MIN_EXTRACT_SIDE: u32 = 128;
 const MAX_INPUT_PIXELS: u64 = 64_000_000;
 const MIN_PSNR_DB: f64 = 40.0;
-const PSNR_ACCEPT_EPSILON_DB: f64 = 0.05;
 const ORIGIN_MARGIN_BLOCKS: i32 = 64;
 const MAX_ORIGIN_CANDIDATES: usize = 512;
 const PARTITION_SAMPLE_ORDER: [usize; 16] = [0, 3, 12, 15, 5, 6, 9, 10, 1, 2, 4, 7, 8, 11, 13, 14];
@@ -59,13 +60,8 @@ const HEADER_DAMAGE_IDENTITY_MIN_SCORE: f32 = 0.20;
 const HEADER_DAMAGE_GEOMETRY_MIN_GAIN: f32 = 0.08;
 const GEOMETRY_MAX_ANGLE_DEGREES: f32 = 180.0;
 const GEOMETRY_PROGRESS_TOTAL: usize = 1024;
-const GEOMETRY_STAGE_DECODE_CANDIDATES: usize = 3;
-const GEOMETRY_MIN_DECODE_SCORE: f32 = 0.014;
-const GEOMETRY_RESIZE_DECODE_MIN_SCORE: f32 = 0.004;
 #[allow(dead_code)]
 const GEOMETRY_DEEP_SEARCH_MIN_SCORE: f32 = 0.007;
-const GEOMETRY_RELATIVE_DECODE_SCORE: f32 = 0.58;
-const GEOMETRY_STRONG_DECODE_SCORE: f32 = 0.12;
 const GEOMETRY_MAX_WORKERS: usize = 8;
 
 #[derive(Debug, Clone)]
@@ -261,14 +257,12 @@ fn affine_for_geometry(
             rotation_degrees,
             scale,
         ),
-        GeometryLayout::FixedCanvasFit => {
-            sync::AffineTransform::new_fixed_canvas_fit_correction(
-                source.width(),
-                source.height(),
-                rotation_degrees,
-                scale,
-            )
-        }
+        GeometryLayout::FixedCanvasFit => sync::AffineTransform::new_fixed_canvas_fit_correction(
+            source.width(),
+            source.height(),
+            rotation_degrees,
+            scale,
+        ),
         GeometryLayout::TightBounds => sync::AffineTransform::new_tight_bounds_correction(
             source.width(),
             source.height(),
@@ -331,6 +325,15 @@ pub fn embed_image_file(
     output_path: impl AsRef<Path>,
     options: &EmbedOptions,
 ) -> Result<EmbedReport> {
+    embed_image_file_with_sync(input_path, output_path, options, false)
+}
+
+pub fn embed_image_file_with_sync(
+    input_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    options: &EmbedOptions,
+    enable_sync: bool,
+) -> Result<EmbedReport> {
     validate_embed_options(options)?;
     let input_path = input_path.as_ref();
     let output_path = output_path.as_ref();
@@ -340,7 +343,9 @@ pub fn embed_image_file(
     })?;
     validate_embed_dimensions(&original)?;
     if original.width() > u16::MAX as u32 || original.height() > u16::MAX as u32 {
-        return Err(CoreError::InvalidArgument("图像边长不能超过 65535 像素".into()));
+        return Err(CoreError::InvalidArgument(
+            "图像边长不能超过 65535 像素".into(),
+        ));
     }
 
     let prepared = prepare_payload(&original, options)?;
@@ -354,7 +359,11 @@ pub fn embed_image_file(
         flags: robust_flags(temporal),
         // 新编码固定使用三级 Haar 金字塔的粗尺度方向细节配置，是因为旧一级高频系数在旋转和分辨率重采样后会快速衰减；配置同时写入公开头以保留可验证的向后兼容读取。
         // New encodes use the three-level Haar-pyramid profile because the legacy high-frequency coefficients decay quickly under rotation and resizing; the public header records the profile for verifiable backward-compatible decoding.
-        qim_profile: dwt_qim::QIM_PROFILE_PYRAMID,
+        qim_profile: if enable_sync {
+            dwt_qim::QIM_PROFILE_SYNC
+        } else {
+            dwt_qim::QIM_PROFILE_INTERLEAVED
+        },
     };
     let header_bits = bytes_to_bits(&header.to_bytes());
     let header_min_votes = robust_header_min_votes(
@@ -364,12 +373,16 @@ pub fn embed_image_file(
     if header_min_votes == 0 {
         return Err(CoreError::InsufficientCapacity {
             required_blocks: ROBUST_HEADER_BITS,
-            available_blocks: (original.width() / BLOCK_SIZE * (original.height() / BLOCK_SIZE)) as usize,
+            available_blocks: (original.width() / BLOCK_SIZE * (original.height() / BLOCK_SIZE))
+                as usize,
         });
     }
 
     let original_rgba = original.to_rgba8();
     let mut watermarked = original_rgba.clone();
+    if enable_sync {
+        crate::pilot::embed(&mut watermarked);
+    }
     embed_robust_bits(
         &mut watermarked,
         &header_bits,
@@ -455,7 +468,7 @@ pub fn probe_embedded_header_file(
             candidate.header.original_height as u32 / BLOCK_SIZE,
         );
         return Ok(Some(PublicWatermarkHeader {
-            algorithm: if candidate.header.qim_profile == dwt_qim::QIM_PROFILE_PYRAMID {
+            algorithm: if candidate.header.qim_profile >= dwt_qim::QIM_PROFILE_PYRAMID {
                 "DWT-QIM-pyramid-BCH-balanced-spatial-voting".into()
             } else {
                 "DWT-QIM-legacy-BCH-balanced-spatial-voting".into()
@@ -494,7 +507,13 @@ pub fn extract_image_file_with_options(
     key_source: &KeySource,
     options: ExtractOptions,
 ) -> Result<ExtractReport> {
-    extract_image_file_internal(input_path.as_ref(), key_source, options, None)
+    extract_image_file_with_recovery(
+        input_path,
+        key_source,
+        options,
+        RecoveryOptions::default(),
+        |_| Ok(()),
+    )
 }
 
 pub fn extract_image_file_with_progress<F>(
@@ -506,12 +525,40 @@ pub fn extract_image_file_with_progress<F>(
 where
     F: FnMut(GeometrySearchProgress) -> Result<()>,
 {
-    extract_image_file_internal(
+    extract_image_file_with_recovery(
+        input_path,
+        key_source,
+        options,
+        RecoveryOptions::default(),
+        &mut on_progress,
+    )
+}
+
+pub fn extract_image_file_with_recovery<F>(
+    input_path: impl AsRef<Path>,
+    key_source: &KeySource,
+    options: ExtractOptions,
+    recovery_options: RecoveryOptions,
+    mut on_progress: F,
+) -> Result<ExtractReport>
+where
+    F: FnMut(GeometrySearchProgress) -> Result<()>,
+{
+    let _scope = RequestScope::enter(recovery_options);
+    recovery::set_key_source(key_source)?;
+    recovery::checkpoint()?;
+    let mut callback = |progress| {
+        recovery::checkpoint()?;
+        on_progress(progress)
+    };
+    let result = extract_image_file_internal(
         input_path.as_ref(),
         key_source,
         options,
-        Some(&mut on_progress),
-    )
+        Some(&mut callback),
+    );
+    recovery::checkpoint()?;
+    result
 }
 
 fn extract_image_file_internal(
@@ -544,7 +591,10 @@ fn extract_image_file_internal(
 
     match extract_registered_image(&image, actual_width, actual_height, key_source, identity) {
         Ok(report) => return Ok(report),
-        Err(error @ CoreError::SaltMismatch) => {
+        Err(error @ CoreError::Cancelled) | Err(error @ CoreError::RecoveryTimeout) => {
+            return Err(error)
+        }
+        Err(error @ CoreError::SaltMismatch) | Err(error @ CoreError::DecryptionFailed) => {
             // 公开头 salt 与已载入密钥均不匹配时，任何几何变换都不会产生正确密钥，因此可以安全地立即返回。
             // When the public-header salt matches none of the loaded keys, no geometry transform can produce the correct key, so returning immediately is safe.
             return Err(error);
@@ -555,6 +605,78 @@ fn extract_image_file_internal(
             // Even when the public header remains readable at the current size, downscaling or resampling can misalign only the body grid; the bounded staged search must continue or compressed images with a readable header but registrable body would be misclassified as permanently damaged.
             let source_rgba = image.to_rgba8();
             let prefer_identity_damage = matches!(&first_error, CoreError::PayloadCorrupted);
+            // 八种精确方向只置换像素，先检查这些廉价路径，避免镜像或直角图先承担连续几何搜索。
+            // The eight exact orientations only permute pixels; checking them first keeps flips and quarter turns from paying for continuous registration.
+            for mirrored in [false, true] {
+                let oriented_source = if mirrored {
+                    imageops::flip_horizontal(&source_rgba)
+                } else {
+                    source_rgba.clone()
+                };
+                for angle in [0.0_f32, 90.0, -90.0, 180.0] {
+                    if !mirrored && angle == 0.0 {
+                        continue;
+                    }
+                    recovery::checkpoint()?;
+                    progress_current += 1;
+                    if let Some(callback) = on_progress.as_deref_mut() {
+                        callback(GeometrySearchProgress::scoring(
+                            progress_current,
+                            angle,
+                            1.0,
+                            "orientation",
+                            1,
+                            true,
+                        ))?;
+                    }
+                    let corrected = if angle == 0.0 {
+                        oriented_source.clone()
+                    } else {
+                        sync::materialize_exact_orientation_checked(
+                            &oriented_source,
+                            angle,
+                            recovery::checkpoint,
+                        )?
+                        .unwrap()
+                    };
+                    recovery::clear_observations();
+                    if collect_robust_header_candidates_at_step_for_phases(
+                        &corrected,
+                        1,
+                        HEADER_STEP,
+                        &[(0, 0)],
+                        false,
+                        true,
+                    )
+                    .0
+                    .is_empty()
+                    {
+                        continue;
+                    }
+                    let registration = SyncRegistration {
+                        rotation_degrees: angle,
+                        scale: 1.0,
+                        translation_x: 0,
+                        translation_y: 0,
+                        score: 1.0,
+                        shear_x: 0.0,
+                        mirrored,
+                    };
+                    match extract_registered_image(
+                        &DynamicImage::ImageRgba8(corrected),
+                        actual_width,
+                        actual_height,
+                        key_source,
+                        registration,
+                    ) {
+                        Ok(report) => return Ok(report),
+                        Err(error @ CoreError::Cancelled)
+                        | Err(error @ CoreError::RecoveryTimeout)
+                        | Err(error @ CoreError::SaltMismatch) => return Err(error),
+                        Err(_) => {}
+                    }
+                }
+            }
             if let Some(report) = search_and_extract_geometry(
                 &source_rgba,
                 actual_width,
@@ -567,44 +689,6 @@ fn extract_image_file_internal(
                 return Ok(report);
             }
 
-            if let Some(callback) = on_progress.as_deref_mut() {
-                progress_current = progress_current.saturating_add(1);
-                // 左右镜像是单独的反射，不是旋转梯子的一部分；先报阶段再搜，避免进度条在翻转搜索时卡住。
-                // Left-right mirroring is a reflection, not part of the rotation ladder; emit the stage before searching so the bar cannot freeze during the flip pass.
-                callback(GeometrySearchProgress::scoring(
-                    progress_current,
-                    0.0,
-                    1.0,
-                    "horizontal-flip",
-                    1,
-                    true,
-                ))?;
-            }
-            let flipped = imageops::flip_horizontal(&source_rgba);
-            let flipped_dyn = DynamicImage::ImageRgba8(flipped.clone());
-            match extract_registered_image(
-                &flipped_dyn,
-                flipped.width(),
-                flipped.height(),
-                key_source,
-                SyncRegistration::identity(1.0),
-            ) {
-                Ok(report) => return Ok(report),
-                Err(CoreError::SaltMismatch) => return Err(first_error),
-                Err(_) => {
-                    if let Some(report) = search_and_extract_geometry(
-                        &flipped,
-                        flipped.width(),
-                        flipped.height(),
-                        key_source,
-                        false,
-                        &mut on_progress,
-                        &mut progress_current,
-                    )? {
-                        return Ok(report);
-                    }
-                }
-            }
             Err(first_error)
         }
     }
@@ -617,7 +701,27 @@ fn extract_registered_image(
     key_source: &KeySource,
     registration: SyncRegistration,
 ) -> Result<ExtractReport> {
-    match extract_robust(image, key_source, registration) {
+    extract_registered_image_with_evidence(
+        image,
+        actual_width,
+        actual_height,
+        key_source,
+        registration,
+        &mut 0.0,
+    )
+}
+
+fn extract_registered_image_with_evidence(
+    image: &DynamicImage,
+    actual_width: u32,
+    actual_height: u32,
+    key_source: &KeySource,
+    registration: SyncRegistration,
+    evidence: &mut f32,
+) -> Result<ExtractReport> {
+    let robust_result = extract_robust(image, key_source, registration, evidence);
+    recovery::checkpoint()?;
+    match robust_result {
         Ok(decoded) => return finalize_report(decoded, actual_width, actual_height),
         Err(error @ CoreError::SaltMismatch) | Err(error @ CoreError::DecryptionFailed) => {
             return Err(error)
@@ -725,7 +829,11 @@ fn embed_robust_bits(
                 );
             } else {
                 let rank = robust_body_rank(bx, by, blocks_x);
-                let index = robust_body_index(rank, route_step, offset, body_blocks, body_bits.len());
+                let index = interleave_body_index(
+                    robust_body_index(rank, route_step, offset, body_blocks, body_bits.len()),
+                    body_bits.len(),
+                    qim_profile,
+                );
                 dwt_qim::write_bit_with_profile(
                     image,
                     bx,
@@ -743,8 +851,15 @@ fn extract_robust(
     image: &DynamicImage,
     key_source: &KeySource,
     mut registration: SyncRegistration,
+    evidence: &mut f32,
 ) -> Result<RobustDecoded> {
-    let rgba = image.to_rgba8();
+    recovery::clear_observations();
+    // 校正图本身已是 RGBA，借用可避免每个候选再复制一整张大图。
+    // Corrections are already RGBA, so borrowing avoids copying a full large image for every candidate.
+    let rgba = image
+        .as_rgba8()
+        .map(Cow::Borrowed)
+        .unwrap_or_else(|| Cow::Owned(image.to_rgba8()));
     let (header_candidates, header_evidence_score) = collect_robust_header_candidates(
         &rgba,
         16,
@@ -753,18 +868,31 @@ fn extract_robust(
         // Geometry warps run the 64-phase sweep only when the zero-phase pilot is already ≥0.82; unconditional full-phase on false candidates stalls 7° fill-crop in header scanning.
         false,
     );
+    *evidence = header_evidence_score;
     if header_candidates.is_empty() {
-        // 强导频但 CRC 未通过时先标记为“疑似局部损坏”，把微旋转与纯遮挡的判别统一交给外层并行快速层，可避免在身份解码阶段重复执行一轮串行邻近几何评分。
-        // A strong pilot with a failed CRC is marked as suspected localized damage and left to the outer parallel fast layer to distinguish micro-rotation from occlusion, avoiding a duplicated sequential nearby-geometry pass during identity decoding.
-        return if header_evidence_score >= HEADER_DAMAGE_EVIDENCE_MIN_SCORE {
-            Err(CoreError::PayloadCorrupted)
-        } else {
-            Err(CoreError::HeaderNotFound)
-        };
+        // 相关分只帮助细化几何，不能代替头校验；未通过 CRC 时必须保持“无有效头”语义。
+        // Correlation guides geometric refinement but cannot replace header validation; a failed CRC must retain the no-valid-header meaning.
+        return Err(CoreError::HeaderNotFound);
+    }
+    if std::env::var_os("PWC_GEOMETRY_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "headers: {:?}",
+            header_candidates
+                .iter()
+                .map(|h| (
+                    h.pixel_phase_x,
+                    h.pixel_phase_y,
+                    h.phase_delta,
+                    h.score,
+                    h.header.body_len
+                ))
+                .collect::<Vec<_>>()
+        );
     }
     let mut last_error = CoreError::PayloadCorrupted;
     let mut credential_error = None;
-    for header_candidate in header_candidates {
+    for header_candidate in header_candidates.into_iter().take(4) {
+        recovery::checkpoint()?;
         let header = &header_candidate.header;
         let body_len = header.body_len as usize;
         let bit_len = bch::encoded_bit_len(body_len);
@@ -775,13 +903,19 @@ fn extract_robust(
             continue;
         }
         let route_step = select_body_route_step(body_blocks, &header.salt);
-        let origins = origin_candidates(
-            header,
-            &header_candidate,
-            rgba.width(),
-            rgba.height(),
-        );
-        for origin in origins {
+        let origins = origin_candidates(header, &header_candidate, rgba.width(), rgba.height());
+        if std::env::var_os("PWC_GEOMETRY_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "origins: {:?}",
+                origins
+                    .iter()
+                    .take(8)
+                    .map(|o| (o.block_x, o.block_y))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for origin in origins.into_iter().take(8) {
+            recovery::checkpoint()?;
             match collect_and_open_robust_body(
                 &rgba,
                 &header_candidate,
@@ -798,10 +932,10 @@ fn extract_robust(
                     {
                         continue;
                     }
-                    let translation_x = origin.block_x * BLOCK_SIZE as i32
-                        - header_candidate.pixel_phase_x as i32;
-                    let translation_y = origin.block_y * BLOCK_SIZE as i32
-                        - header_candidate.pixel_phase_y as i32;
+                    let translation_x =
+                        origin.block_x * BLOCK_SIZE as i32 - header_candidate.pixel_phase_x as i32;
+                    let translation_y =
+                        origin.block_y * BLOCK_SIZE as i32 - header_candidate.pixel_phase_y as i32;
                     registration.translation_x = translation_x;
                     registration.translation_y = translation_y;
                     registration.score = registration.score.max(header_candidate.score);
@@ -819,7 +953,8 @@ fn extract_robust(
                         normalized,
                     });
                 }
-                Err(error @ CoreError::SaltMismatch) | Err(error @ CoreError::DecryptionFailed) => {
+                Err(error @ CoreError::DecryptionFailed) => return Err(error),
+                Err(error @ CoreError::SaltMismatch) => {
                     if credential_error.is_none() {
                         credential_error = Some(error);
                     }
@@ -849,7 +984,16 @@ fn collect_and_open_robust_body(
     let base_strength = candidate.header.strength_x10 as f32 / 10.0;
     let mut last_error = CoreError::PayloadCorrupted;
     let mut strength_factors = Vec::with_capacity(5);
-    for factor in [candidate.step_factor, 1.0_f32, 0.85, 0.70, 1.15] {
+    for factor in [
+        candidate.step_factor,
+        1.0_f32,
+        0.85,
+        0.70,
+        1.15,
+        0.55,
+        0.40,
+        1.30,
+    ] {
         if !strength_factors
             .iter()
             .any(|existing: &f32| (*existing - factor).abs() < 0.01)
@@ -860,6 +1004,7 @@ fn collect_and_open_robust_body(
     // 公开头在哪个衰减步长恢复成功，正文通常也经历了相近的频域衰减；优先复用该比例可让 JPEG 压缩图片少做一到三次完整正文扫描。
     // The body usually experiences frequency attenuation close to the step that recovered the public header, so trying that ratio first avoids one to three full body scans for JPEG-compressed images.
     for factor in strength_factors {
+        recovery::checkpoint()?;
         match collect_and_open_robust_body_at_strength(
             image,
             candidate,
@@ -871,7 +1016,9 @@ fn collect_and_open_robust_body(
             base_strength * factor,
         ) {
             Ok(decoded) => return Ok(decoded),
-            Err(error @ CoreError::SaltMismatch) => return Err(error),
+            Err(error @ CoreError::SaltMismatch) | Err(error @ CoreError::DecryptionFailed) => {
+                return Err(error)
+            }
             Err(error) => last_error = error,
         }
     }
@@ -896,9 +1043,18 @@ fn collect_and_open_robust_body_at_strength(
     let original_blocks_x = header.original_width as u32 / BLOCK_SIZE;
     let original_blocks_y = header.original_height as u32 / BLOCK_SIZE;
     let offset = salt_offset(&header.salt, body_blocks);
+    let differences = recovery::observations(
+        image,
+        candidate.pixel_phase_x,
+        candidate.pixel_phase_y,
+        header.qim_profile,
+    )?;
     let mut region_signed = vec![0.0_f32; bit_len * BODY_VOTE_REGION_COUNT];
     let mut region_weights = vec![0.0_f32; bit_len * BODY_VOTE_REGION_COUNT];
     for local_y in 0..blocks_y {
+        if local_y % 8 == 0 {
+            recovery::checkpoint()?;
+        }
         for local_x in 0..blocks_x {
             let absolute_x = local_x as i32 + origin.block_x;
             let absolute_y = local_y as i32 + origin.block_y;
@@ -911,7 +1067,11 @@ fn collect_and_open_robust_body_at_strength(
                 continue;
             }
             let rank = robust_body_rank(absolute_x as u32, absolute_y as u32, original_blocks_x);
-            let index = robust_body_index(rank, route_step, offset, body_blocks, bit_len);
+            let index = interleave_body_index(
+                robust_body_index(rank, route_step, offset, body_blocks, bit_len),
+                bit_len,
+                header.qim_profile,
+            );
             let pixel_x = candidate.pixel_phase_x + local_x * BLOCK_SIZE;
             let pixel_y = candidate.pixel_phase_y + local_y * BLOCK_SIZE;
             if block_is_solid_geometry_fill(image, pixel_x, pixel_y) {
@@ -919,10 +1079,8 @@ fn collect_and_open_robust_body_at_strength(
                 // Fixed-canvas inversion after a fill-crop leaves solid black/white filler; those blocks carry no payload, and counting them in the vote turns an otherwise recoverable body into an authentication failure.
                 continue;
             }
-            let observation = read_qim_at_pixel(
-                image,
-                pixel_x,
-                pixel_y,
+            let observation = dwt_qim::observe_difference(
+                differences[(local_y * blocks_x + local_x) as usize],
                 strength,
                 header.qim_profile,
             );
@@ -931,25 +1089,24 @@ fn collect_and_open_robust_body_at_strength(
             let region_y = ((absolute_y as usize * 2) / original_blocks_y.max(1) as usize).min(1);
             let region = region_y * 2 + region_x;
             let slot = index * BODY_VOTE_REGION_COUNT + region;
-            let signed = if observation.bit { confidence } else { -confidence };
+            let signed = if observation.bit {
+                confidence
+            } else {
+                -confidence
+            };
             region_signed[slot] += signed;
             region_weights[slot] += confidence;
         }
     }
 
     const REGION_MASKS: [u8; 15] = [
-        0b1111, 0b0111, 0b1011, 0b1101, 0b1110, 0b0011, 0b1100, 0b0101,
-        0b1010, 0b0110, 0b1001, 0b0001, 0b0010, 0b0100, 0b1000,
+        0b1111, 0b0111, 0b1011, 0b1101, 0b1110, 0b0011, 0b1100, 0b0101, 0b1010, 0b0110, 0b1001,
+        0b0001, 0b0010, 0b0100, 0b1000,
     ];
     let mut vote_candidates: Vec<BodyVoteCandidate> = REGION_MASKS
         .into_iter()
         .filter_map(|region_mask| {
-            build_body_vote_candidate(
-                &region_signed,
-                &region_weights,
-                bit_len,
-                region_mask,
-            )
+            build_body_vote_candidate(&region_signed, &region_weights, bit_len, region_mask)
         })
         .collect();
     vote_candidates.sort_by(|left, right| {
@@ -964,16 +1121,17 @@ fn collect_and_open_robust_body_at_strength(
                     .unwrap_or(Ordering::Equal)
             })
     });
-    vote_candidates.dedup_by(|left, right| {
-        left.bits == right.bits && left.observed == right.observed
-    });
+    vote_candidates
+        .dedup_by(|left, right| left.bits == right.bits && left.observed == right.observed);
     // 先验证全图和三象限共识、失败后才降到半图与单象限，是为了让未遮挡媒体保持一次解码的快速路径，同时把重度遮挡恢复留在按需进入的深层。
     // Full-image and three-quadrant consensus are verified before half- and single-quadrant subsets so clean media keeps a one-decode fast path while severe-occlusion recovery remains an on-demand deeper layer.
 
     let key = resolve_key(key_source, &header.salt)?;
     let mut last_error = CoreError::PayloadCorrupted;
     for vote_candidate in vote_candidates {
+        recovery::checkpoint()?;
         for max_erasures in [0_usize, 2, 4, 6] {
+            recovery::checkpoint()?;
             let erasures = build_body_erasures(
                 &vote_candidate.reliabilities,
                 &vote_candidate.observed,
@@ -990,7 +1148,23 @@ fn collect_and_open_robust_body_at_strength(
                 Ok(payload) => return Ok((payload, decoded.corrected_codewords)),
                 // 每个空间子集最终都必须通过 AEAD 认证，因此可以安全尝试避开被遮挡象限的票，而不会用“看似合理”的 BCH 输出制造假阳性。
                 // Every spatial subset must still pass AEAD authentication, so votes from occluded quadrants can be bypassed safely without turning plausible-looking BCH output into a false positive.
+                Err(error @ CoreError::DecryptionFailed) => return Err(error),
                 Err(error) => last_error = error,
+            }
+        }
+        if vote_candidate.region_mask == 0b1111 {
+            for decoded in bch::erasure_candidates(
+                &vote_candidate.bits,
+                &vote_candidate.observed,
+                &vote_candidate.reliabilities,
+                header.body_len as usize,
+            ) {
+                recovery::checkpoint()?;
+                match open_encrypted_body(&decoded.bytes, &key) {
+                    Ok(payload) => return Ok((payload, decoded.corrected_codewords)),
+                    Err(error @ CoreError::DecryptionFailed) => return Err(error),
+                    Err(_) => {}
+                }
             }
         }
     }
@@ -1075,11 +1249,7 @@ fn spatial_consensus_margin(margins: &[f32]) -> f32 {
     }
 }
 
-fn build_body_erasures(
-    reliabilities: &[f32],
-    observed: &[bool],
-    max_erasures: usize,
-) -> Vec<bool> {
+fn build_body_erasures(reliabilities: &[f32], observed: &[bool], max_erasures: usize) -> Vec<bool> {
     let mut erasures = vec![false; reliabilities.len()];
     if max_erasures == 0 {
         return erasures;
@@ -1090,13 +1260,11 @@ fn build_body_erasures(
         candidates.sort_by(|left, right| {
             let left_missing = !observed[*left];
             let right_missing = !observed[*right];
-            right_missing
-                .cmp(&left_missing)
-                .then_with(|| {
-                    reliabilities[*left]
-                        .partial_cmp(&reliabilities[*right])
-                        .unwrap_or(Ordering::Equal)
-                })
+            right_missing.cmp(&left_missing).then_with(|| {
+                reliabilities[*left]
+                    .partial_cmp(&reliabilities[*right])
+                    .unwrap_or(Ordering::Equal)
+            })
         });
         for index in candidates.into_iter().take(max_erasures) {
             if !observed[index] || reliabilities[index] < 0.34 {
@@ -1109,168 +1277,132 @@ fn build_body_erasures(
     erasures
 }
 
+// 先用分散采样排列像素相位，再只完整读取高分项，避免每个错误几何候选都扫描整图六十四次。
+// Rank pixel phases with dispersed samples before fully reading the leaders, avoiding sixty-four full-image scans for every false geometry candidate.
 fn collect_robust_header_candidates(
     image: &RgbaImage,
     limit: usize,
     skip_solid_fill: bool,
-    allow_full_phase: bool,
+    _allow_full_phase: bool,
 ) -> (Vec<HeaderCandidate>, f32) {
-    let zero_phase = [(0_u32, 0_u32)];
-    let (fast_candidates, mut best_signature_score) =
-        collect_robust_header_candidates_at_step_for_phases(
-            image,
-            limit,
-            HEADER_STEP,
-            &zero_phase,
-            false,
-            skip_solid_fill,
-        );
-    let cropped_against_header = fast_candidates.iter().any(|candidate| {
-        candidate.header.original_width as u32 > image.width()
-            || candidate.header.original_height as u32 > image.height()
+    let (fast, mut evidence) = collect_robust_header_candidates_at_step_for_phases(
+        image,
+        limit,
+        HEADER_STEP,
+        &[(0, 0)],
+        false,
+        skip_solid_fill,
+    );
+    let mut cropped = fast.iter().any(|item| {
+        item.header.original_width as u32 > image.width()
+            || item.header.original_height as u32 > image.height()
     });
-    if !fast_candidates.is_empty() && !cropped_against_header {
-        // 未裁剪的压缩媒体通常仍保持零像素相位，因此先验证这一条路径可避免正常图片重复扫描全部六十四种块起点。
-        // Compressed media that was not cropped usually keeps zero pixel phase, so validating this path first avoids rescanning all sixty-four block origins for normal images.
-        return (fast_candidates, best_signature_score);
+    if !fast.is_empty() && !cropped {
+        return (fast, evidence);
     }
-    // 当前图比公开头声明的原图小，零相位 CRC 可能是裁切后的巧合命中；继续邻近相位才能落到真正的块起点。
-    // When the current image is smaller than the header's original size, a zero-phase CRC can be a crop coincidence; nearby phases must still run to reach the true block origin.
-
-    if !cropped_against_header && best_signature_score >= HEADER_ADAPTIVE_STEP_MIN_SCORE {
-        for factor in [0.85_f32, 0.70, 1.15] {
-            let (fallback, score) = collect_robust_header_candidates_at_step_for_phases(
+    let mut all = fast;
+    let mut ranked = Vec::new();
+    for py in 0..8 {
+        for px in 0..8 {
+            if recovery::stopped() {
+                return (Vec::new(), evidence);
+            }
+            let bx = image.width().saturating_sub(px) / 8;
+            let by = image.height().saturating_sub(py) / 8;
+            let count = (bx * by) as usize;
+            if count < 320 {
+                continue;
+            }
+            let budget = count.min(3072);
+            let stride = geometry_sample_step(count, budget);
+            let mut best = 0.0_f32;
+            for profile in [dwt_qim::QIM_PROFILE_PYRAMID, dwt_qim::QIM_PROFILE_LEGACY] {
+                let known = recovery_header_bits(profile);
+                let mut signed = [0.0_f32; ROBUST_HEADER_BITS * 3];
+                let mut weights = [0.0_f32; ROBUST_HEADER_BITS * 3];
+                let mut counts = [0_u32; ROBUST_HEADER_BITS * 3];
+                for i in 0..budget {
+                    let index = (i * stride) % count;
+                    let x = (index % bx as usize) as u32;
+                    let y = (index / bx as usize) as u32;
+                    let observation =
+                        read_qim_at_pixel(image, px + x * 8, py + y * 8, HEADER_STEP, profile);
+                    let phase = robust_phase(x as i32, y as i32);
+                    // 校正图外部的纯色填充不参与相位排名，否则大角度旋转留下的空白会压过真实导频。
+                    // Solid correction fill is excluded from phase ranking or blank areas from large rotations overwhelm the real pilot.
+                    if skip_solid_fill
+                        && block_is_solid_geometry_fill(image, px + x * 8, py + y * 8)
+                    {
+                        continue;
+                    }
+                    signed[phase] += if observation.bit {
+                        observation.confidence
+                    } else {
+                        -observation.confidence
+                    };
+                    weights[phase] += observation.confidence;
+                    counts[phase] += 1;
+                }
+                for delta in 0..960 {
+                    let mut value = 0.0;
+                    let mut used = 0;
+                    let mut quality = 0.0;
+                    let mut count = 0;
+                    for &(index, bit) in &known {
+                        let phase = (index * 3 + 960 - delta) % 960;
+                        if weights[phase] > 0.0 {
+                            value += signed[phase] / weights[phase] * if bit { 1.0 } else { -1.0 };
+                            used += 1;
+                            quality += weights[phase];
+                            count += counts[phase];
+                        }
+                    }
+                    if used >= 60 {
+                        best = best.max(
+                            (0.5 + 0.5 * value / used as f32) * 0.8
+                                + 0.2 * quality / count.max(1) as f32,
+                        );
+                    }
+                }
+            }
+            ranked.push((best, px, py));
+        }
+    }
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (score, px, py) in ranked.into_iter().take(6) {
+        evidence = evidence.max(score);
+        if score < 0.80 {
+            break;
+        }
+        for factor in [1.0, 0.85, 0.70, 1.15] {
+            if recovery::stopped() {
+                return (Vec::new(), evidence);
+            }
+            let (candidates, observed) = collect_robust_header_candidates_at_step_for_phases(
                 image,
                 limit,
                 HEADER_STEP * factor,
-                &zero_phase,
-                false,
-                skip_solid_fill,
-            );
-            best_signature_score = best_signature_score.max(score);
-            if !fallback.is_empty() {
-                // JPEG 会改变频域量化间距却通常不会移动块网格，零相位先适配步长可显著缩短压缩图片的常见成功路径。
-                // JPEG changes frequency-domain quantization spacing but usually not the block grid, so adapting the step at zero phase substantially shortens the common success path for compressed images.
-                return (fallback, best_signature_score);
-            }
-        }
-    }
-
-    let try_nearby_phases = if skip_solid_fill && !cropped_against_header {
-        best_signature_score >= HEADER_ADAPTIVE_STEP_MIN_SCORE
-    } else {
-        // 中心放大再裁回会先物化成比公开头更小的图；几何校正也必须扫邻近相位，不能只留给身份解码。
-        // Center-zoom crop-back materializes smaller than the public header; geometry warps must still scan nearby phases instead of leaving that only to identity.
-        true
-    };
-    if try_nearby_phases {
-        const NEARBY_PHASES: [(u32, u32); 21] = [
-            (1, 0),
-            (0, 1),
-            (1, 1),
-            (2, 0),
-            (0, 2),
-            (2, 2),
-            (7, 0),
-            (0, 7),
-            (7, 7),
-            (4, 0),
-            (0, 4),
-            (3, 3),
-            (5, 3),
-            (5, 0),
-            (0, 3),
-            (6, 3),
-            (5, 4),
-            (1, 7),
-            (7, 1),
-            (2, 6),
-            (6, 2),
-        ];
-        {
-            let (nearby, score) = collect_robust_header_candidates_at_step_for_phases(
-                image,
-                limit,
-                HEADER_STEP,
-                &NEARBY_PHASES,
+                &[(px, py)],
                 true,
                 skip_solid_fill,
             );
-            best_signature_score = best_signature_score.max(score);
-            if !nearby.is_empty() {
-                let mut merged = nearby;
-                merged.sort_by_key(|candidate| {
-                    let phase = (candidate.pixel_phase_x, candidate.pixel_phase_y);
-                    u8::from(phase != (7, 1) && phase != (1, 7))
+            evidence = evidence.max(observed);
+            if !candidates.is_empty() {
+                cropped |= candidates.iter().any(|item| {
+                    item.header.original_width as u32 > image.width()
+                        || item.header.original_height as u32 > image.height()
                 });
-                if cropped_against_header {
-                    for candidate in fast_candidates {
-                        if !merged.iter().any(|existing| {
-                            existing.pixel_phase_x == candidate.pixel_phase_x
-                                && existing.pixel_phase_y == candidate.pixel_phase_y
-                        }) {
-                            merged.push(candidate);
-                        }
-                    }
+                if !cropped {
+                    return (candidates, evidence);
                 }
-                return (merged, best_signature_score);
+                all.extend(candidates);
+                break;
             }
         }
     }
-
-    if !allow_full_phase && best_signature_score < HEADER_DAMAGE_EVIDENCE_MIN_SCORE {
-        // 身份检测的 64 相位全扫描只在零相位导频已经很像真头时才做；7° 铺满裁切在错误网格上也能摸到 0.66 的巧合分，否则会在进入强制铺满倒数前卡两分钟。
-        // Identity's 64-phase sweep runs only when the zero-phase pilot already looks like a real header; a 7° fill-crop can still score 0.66 on the wrong grid, which would stall for minutes before the forced fill-crop reciprocals.
-        return (Vec::new(), best_signature_score);
-    }
-
-    let (candidates, score) =
-        collect_robust_header_candidates_at_step(image, limit, HEADER_STEP, skip_solid_fill);
-    best_signature_score = best_signature_score.max(score);
-    if !candidates.is_empty() {
-        return (candidates, best_signature_score);
-    }
-    if best_signature_score < HEADER_ADAPTIVE_STEP_MIN_SCORE {
-        // 完整相位扫描仍没有接近有效导频时不再扩大步长，是为了让无水印或几何失配图片尽快进入更合适的恢复层。
-        // When the full phase scan still lacks near-valid pilot evidence, step expansion stops so unmarked or geometrically misaligned images can move quickly to the appropriate recovery layer.
-        return (Vec::new(), best_signature_score);
-    }
-
-    for factor in [0.85_f32, 0.70, 1.15] {
-        let (fallback, score) = collect_robust_header_candidates_at_step(
-            image,
-            limit,
-            HEADER_STEP * factor,
-            skip_solid_fill,
-        );
-        best_signature_score = best_signature_score.max(score);
-        if !fallback.is_empty() {
-            return (fallback, best_signature_score);
-        }
-    }
-    (Vec::new(), best_signature_score)
-}
-
-fn collect_robust_header_candidates_at_step(
-    image: &RgbaImage,
-    limit: usize,
-    header_step: f32,
-    skip_solid_fill: bool,
-) -> (Vec<HeaderCandidate>, f32) {
-    let mut phases = Vec::with_capacity((BLOCK_SIZE * BLOCK_SIZE) as usize);
-    for pixel_phase_y in 0..BLOCK_SIZE.min(image.height()) {
-        for pixel_phase_x in 0..BLOCK_SIZE.min(image.width()) {
-            phases.push((pixel_phase_x, pixel_phase_y));
-        }
-    }
-    collect_robust_header_candidates_at_step_for_phases(
-        image,
-        limit,
-        header_step,
-        &phases,
-        true,
-        skip_solid_fill,
-    )
+    all.sort_by(|a, b| b.score.total_cmp(&a.score));
+    all.truncate(limit);
+    (all, evidence)
 }
 
 fn collect_robust_header_candidates_at_step_for_phases(
@@ -1285,162 +1417,193 @@ fn collect_robust_header_candidates_at_step_for_phases(
     let mut candidates = Vec::new();
     let mut best_signature_score = 0.0_f32;
     for &(pixel_phase_x, pixel_phase_y) in phases {
-            let blocks_x = image.width().saturating_sub(pixel_phase_x) / BLOCK_SIZE;
-            let blocks_y = image.height().saturating_sub(pixel_phase_y) / BLOCK_SIZE;
-            if blocks_x * blocks_y < ROBUST_HEADER_BITS as u32 {
-                continue;
+        if recovery::stopped() {
+            return (Vec::new(), best_signature_score);
+        }
+        let blocks_x = image.width().saturating_sub(pixel_phase_x) / BLOCK_SIZE;
+        let blocks_y = image.height().saturating_sub(pixel_phase_y) / BLOCK_SIZE;
+        if blocks_x * blocks_y < ROBUST_HEADER_BITS as u32 {
+            continue;
+        }
+        for qim_profile in [dwt_qim::QIM_PROFILE_PYRAMID, dwt_qim::QIM_PROFILE_LEGACY] {
+            let Ok(differences) =
+                recovery::observations(image, pixel_phase_x, pixel_phase_y, qim_profile)
+            else {
+                return (Vec::new(), best_signature_score);
+            };
+            let mut signed = vec![0.0_f32; modulus];
+            let mut weights = vec![0.0_f32; modulus];
+            let mut phase_counts = vec![0_u32; modulus];
+            let mut region_signed = vec![0.0_f32; modulus * BODY_VOTE_REGION_COUNT];
+            let mut region_weights = vec![0.0_f32; modulus * BODY_VOTE_REGION_COUNT];
+            for by in 0..blocks_y {
+                if by % 8 == 0 && recovery::stopped() {
+                    return (Vec::new(), best_signature_score);
+                }
+                for bx in 0..blocks_x {
+                    let pixel_x = pixel_phase_x + bx * BLOCK_SIZE;
+                    let pixel_y = pixel_phase_y + by * BLOCK_SIZE;
+                    if skip_solid_fill && block_is_solid_geometry_fill(image, pixel_x, pixel_y) {
+                        // 仅在几何校正图上跳过纯色填补，是因为身份解码时近白文档的平坦块仍可能带着导频，一律跳过会把完好媒体读成无头。
+                        // Skip solid fill only on geometry-corrected images because identity reads of near-white documents can still carry pilot in flat blocks, and skipping them always would turn intact media into a missing header.
+                        continue;
+                    }
+                    let phase = robust_phase(bx as i32, by as i32);
+                    let observation = dwt_qim::observe_difference(
+                        differences[(by * blocks_x + bx) as usize],
+                        header_step,
+                        qim_profile,
+                    );
+                    let observation_signed = if observation.bit {
+                        observation.confidence
+                    } else {
+                        -observation.confidence
+                    };
+                    signed[phase] += observation_signed;
+                    weights[phase] += observation.confidence;
+                    phase_counts[phase] += 1;
+                    let region_x = ((bx as usize * 2) / blocks_x.max(1) as usize).min(1);
+                    let region_y = ((by as usize * 2) / blocks_y.max(1) as usize).min(1);
+                    let region = region_y * 2 + region_x;
+                    let region_slot = region * modulus + phase;
+                    region_signed[region_slot] += observation_signed;
+                    region_weights[region_slot] += observation.confidence;
+                }
             }
-            for qim_profile in [
-                dwt_qim::QIM_PROFILE_PYRAMID,
-                dwt_qim::QIM_PROFILE_LEGACY,
-            ] {
-                let mut signed = vec![0.0_f32; modulus];
-                let mut weights = vec![0.0_f32; modulus];
-                let mut region_signed = vec![0.0_f32; modulus * BODY_VOTE_REGION_COUNT];
-                let mut region_weights = vec![0.0_f32; modulus * BODY_VOTE_REGION_COUNT];
-                for by in 0..blocks_y {
-                    for bx in 0..blocks_x {
-                        let pixel_x = pixel_phase_x + bx * BLOCK_SIZE;
-                        let pixel_y = pixel_phase_y + by * BLOCK_SIZE;
-                        if skip_solid_fill && block_is_solid_geometry_fill(image, pixel_x, pixel_y) {
-                            // 仅在几何校正图上跳过纯色填补，是因为身份解码时近白文档的平坦块仍可能带着导频，一律跳过会把完好媒体读成无头。
-                            // Skip solid fill only on geometry-corrected images because identity reads of near-white documents can still carry pilot in flat blocks, and skipping them always would turn intact media into a missing header.
+            let mut promising_deltas = Vec::with_capacity(modulus);
+            for delta in 0..modulus {
+                if delta % 32 == 0 && recovery::stopped() {
+                    return (Vec::new(), best_signature_score);
+                }
+                let mut delta_signature_score = 0.0_f32;
+                for use_spatial_consensus in [false, true] {
+                    let Some((bits, reliabilities, confidence_sum)) = build_header_vote_candidate(
+                        &signed,
+                        &weights,
+                        &region_signed,
+                        &region_weights,
+                        delta,
+                        use_spatial_consensus,
+                    ) else {
+                        continue;
+                    };
+                    let signature_score = robust_header_signature_score(&bits);
+                    delta_signature_score = delta_signature_score.max(signature_score);
+                    best_signature_score = best_signature_score.max(signature_score);
+                    if signature_score < HEADER_SIGNATURE_MIN_SCORE {
+                        continue;
+                    }
+                    if let Some(header) = decode_or_repair_robust_header(&bits, &reliabilities) {
+                        if (header.qim_profile == dwt_qim::QIM_PROFILE_LEGACY)
+                            != (qim_profile == dwt_qim::QIM_PROFILE_LEGACY)
+                        {
                             continue;
                         }
-                        let phase = robust_phase(bx as i32, by as i32);
-                        let observation = read_qim_at_pixel(
-                            image,
-                            pixel_x,
-                            pixel_y,
-                            header_step,
-                            qim_profile,
-                        );
-                        let observation_signed = if observation.bit {
-                            observation.confidence
-                        } else {
-                            -observation.confidence
-                        };
-                        signed[phase] += observation_signed;
-                        weights[phase] += observation.confidence;
-                        let region_x = ((bx as usize * 2) / blocks_x.max(1) as usize).min(1);
-                        let region_y = ((by as usize * 2) / blocks_y.max(1) as usize).min(1);
-                        let region = region_y * 2 + region_x;
-                        let region_slot = region * modulus + phase;
-                        region_signed[region_slot] += observation_signed;
-                        region_weights[region_slot] += observation.confidence;
+                        let mut raw_quality = 0.0;
+                        let mut raw_count = 0;
+                        for index in 0..ROBUST_HEADER_BITS {
+                            let phase = (index * 3 + modulus - delta) % modulus;
+                            raw_quality += weights[phase];
+                            raw_count += phase_counts[phase];
+                        }
+                        let raw_quality = raw_quality / raw_count.max(1) as f32;
+                        candidates.push(HeaderCandidate {
+                            header,
+                            pixel_phase_x,
+                            pixel_phase_y,
+                            phase_delta: delta,
+                            step_factor: (header_step / HEADER_STEP).clamp(0.5, 1.5),
+                            score: (confidence_sum / ROBUST_HEADER_BITS as f32) * 0.25
+                                + signature_score * 0.25
+                                + raw_quality * 0.5,
+                        });
                     }
                 }
-                let mut promising_deltas = Vec::with_capacity(modulus);
-                for delta in 0..modulus {
-                    let mut delta_signature_score = 0.0_f32;
-                    for use_spatial_consensus in [false, true] {
+                promising_deltas.push((delta_signature_score, delta));
+            }
+
+            let has_promising_region_phase = promising_deltas
+                .iter()
+                .any(|(score, _)| *score >= HEADER_ADAPTIVE_STEP_MIN_SCORE);
+            if allow_region_subsets && candidates.is_empty() && has_promising_region_phase {
+                promising_deltas
+                    .sort_by(|left, right| right.0.partial_cmp(&left.0).unwrap_or(Ordering::Equal));
+                promising_deltas.truncate(6);
+                const HEADER_REGION_MASKS: [u8; 14] = [
+                    0b0001, 0b0010, 0b0100, 0b1000, 0b0011, 0b1100, 0b0101, 0b1010, 0b0110, 0b1001,
+                    0b0111, 0b1011, 0b1101, 0b1110,
+                ];
+                for (_, delta) in promising_deltas {
+                    for region_mask in HEADER_REGION_MASKS {
                         let Some((bits, reliabilities, confidence_sum)) =
-                            build_header_vote_candidate(
-                                &signed,
-                                &weights,
+                            build_header_region_vote_candidate(
                                 &region_signed,
                                 &region_weights,
                                 delta,
-                                use_spatial_consensus,
+                                region_mask,
                             )
                         else {
                             continue;
                         };
                         let signature_score = robust_header_signature_score(&bits);
-                        delta_signature_score = delta_signature_score.max(signature_score);
                         best_signature_score = best_signature_score.max(signature_score);
                         if signature_score < HEADER_SIGNATURE_MIN_SCORE {
                             continue;
                         }
-                        if let Some(header) = decode_or_repair_robust_header(&bits, &reliabilities) {
-                            if header.qim_profile != qim_profile {
+                        if let Some(header) = decode_or_repair_robust_header(&bits, &reliabilities)
+                        {
+                            if (header.qim_profile == dwt_qim::QIM_PROFILE_LEGACY)
+                                != (qim_profile == dwt_qim::QIM_PROFILE_LEGACY)
+                            {
                                 continue;
                             }
+                            // 仅对最有希望的相位尝试区域子集，是为了在大面积遮挡破坏多数象限时保留幸存载波，同时避免把所有相位乘以所有区域组合而拖慢正常路径。
+                            // Region subsets are tried only for the most promising phases so surviving carriers can recover after majority-quadrant occlusion without multiplying every phase by every region combination on the normal path.
+                            let mut raw_quality = 0.0;
+                            let mut raw_count = 0;
+                            for index in 0..ROBUST_HEADER_BITS {
+                                let phase = (index * 3 + modulus - delta) % modulus;
+                                raw_quality += weights[phase];
+                                raw_count += phase_counts[phase];
+                            }
+                            let raw_quality = raw_quality / raw_count.max(1) as f32;
                             candidates.push(HeaderCandidate {
                                 header,
                                 pixel_phase_x,
                                 pixel_phase_y,
                                 phase_delta: delta,
                                 step_factor: (header_step / HEADER_STEP).clamp(0.5, 1.5),
-                                score: (confidence_sum / ROBUST_HEADER_BITS as f32) * 0.75
-                                    + signature_score * 0.25,
+                                score: (confidence_sum / ROBUST_HEADER_BITS as f32) * 0.25
+                                    + signature_score * 0.25
+                                    + raw_quality * 0.5,
                             });
                         }
                     }
-                    promising_deltas.push((delta_signature_score, delta));
-                }
-
-                let has_promising_region_phase = promising_deltas
-                    .iter()
-                    .any(|(score, _)| *score >= HEADER_ADAPTIVE_STEP_MIN_SCORE);
-                if allow_region_subsets && candidates.is_empty() && has_promising_region_phase {
-                    promising_deltas.sort_by(|left, right| {
-                        right.0.partial_cmp(&left.0).unwrap_or(Ordering::Equal)
-                    });
-                    promising_deltas.truncate(6);
-                    const HEADER_REGION_MASKS: [u8; 14] = [
-                        0b0001, 0b0010, 0b0100, 0b1000, 0b0011, 0b1100, 0b0101,
-                        0b1010, 0b0110, 0b1001, 0b0111, 0b1011, 0b1101, 0b1110,
-                    ];
-                    for (_, delta) in promising_deltas {
-                        for region_mask in HEADER_REGION_MASKS {
-                            let Some((bits, reliabilities, confidence_sum)) =
-                                build_header_region_vote_candidate(
-                                    &region_signed,
-                                    &region_weights,
-                                    delta,
-                                    region_mask,
-                                )
-                            else {
-                                continue;
-                            };
-                            let signature_score = robust_header_signature_score(&bits);
-                            best_signature_score = best_signature_score.max(signature_score);
-                            if signature_score < HEADER_SIGNATURE_MIN_SCORE {
-                                continue;
-                            }
-                            if let Some(header) = decode_or_repair_robust_header(&bits, &reliabilities) {
-                                if header.qim_profile != qim_profile {
-                                    continue;
-                                }
-                                // 仅对最有希望的相位尝试区域子集，是为了在大面积遮挡破坏多数象限时保留幸存载波，同时避免把所有相位乘以所有区域组合而拖慢正常路径。
-                                // Region subsets are tried only for the most promising phases so surviving carriers can recover after majority-quadrant occlusion without multiplying every phase by every region combination on the normal path.
-                                candidates.push(HeaderCandidate {
-                                    header,
-                                    pixel_phase_x,
-                                    pixel_phase_y,
-                                    phase_delta: delta,
-                                    step_factor: (header_step / HEADER_STEP).clamp(0.5, 1.5),
-                                    score: (confidence_sum / ROBUST_HEADER_BITS as f32) * 0.72
-                                        + signature_score * 0.28,
-                                });
-                            }
-                        }
-                    }
-                }
-                if !candidates.is_empty() {
-                    // 同时尝试全局加权票与四象限稳健共识，是为了让单块遮挡只污染其所在区域，而不会把整幅图中仍然一致的头位一起拖翻。
-                    // Trying both global weighted voting and four-quadrant robust consensus keeps a localized occluder from overturning header bits that remain consistent across the rest of the image.
-                    // 先尝试新的三级 Haar 金字塔配置并用头内配置字节交叉验证，是为了快速读取新媒体，同时防止另一套系数上的偶然 CRC 命中被当成真水印。
-                    // Trying the new three-level Haar-pyramid profile first and cross-checking the profile byte in the header keeps new-media reads fast while rejecting accidental CRC hits from the other coefficient pair.
-                    candidates.sort_by(|left, right| {
-                        right
-                            .score
-                            .partial_cmp(&left.score)
-                            .unwrap_or(Ordering::Equal)
-                    });
-                    candidates.dedup_by(|left, right| {
-                        left.header.salt == right.header.salt
-                            && left.header.qim_profile == right.header.qim_profile
-                            && left.pixel_phase_x == right.pixel_phase_x
-                            && left.pixel_phase_y == right.pixel_phase_y
-                            && left.phase_delta == right.phase_delta
-                    });
-                    candidates.truncate(limit);
-                    return (candidates, best_signature_score);
                 }
             }
+            if !candidates.is_empty() {
+                // 同时尝试全局加权票与四象限稳健共识，是为了让单块遮挡只污染其所在区域，而不会把整幅图中仍然一致的头位一起拖翻。
+                // Trying both global weighted voting and four-quadrant robust consensus keeps a localized occluder from overturning header bits that remain consistent across the rest of the image.
+                // 先尝试新的三级 Haar 金字塔配置并用头内配置字节交叉验证，是为了快速读取新媒体，同时防止另一套系数上的偶然 CRC 命中被当成真水印。
+                // Trying the new three-level Haar-pyramid profile first and cross-checking the profile byte in the header keeps new-media reads fast while rejecting accidental CRC hits from the other coefficient pair.
+                candidates.sort_by(|left, right| {
+                    right
+                        .score
+                        .partial_cmp(&left.score)
+                        .unwrap_or(Ordering::Equal)
+                });
+                candidates.dedup_by(|left, right| {
+                    left.header.salt == right.header.salt
+                        && left.header.qim_profile == right.header.qim_profile
+                        && left.pixel_phase_x == right.pixel_phase_x
+                        && left.pixel_phase_y == right.pixel_phase_y
+                        && left.phase_delta == right.phase_delta
+                });
+                candidates.truncate(limit);
+                return (candidates, best_signature_score);
+            }
         }
+    }
     candidates.sort_by(|left, right| {
         right
             .score
@@ -1486,8 +1649,7 @@ fn build_header_vote_candidate(
             for region in 0..BODY_VOTE_REGION_COUNT {
                 let slot = region * modulus + local_phase;
                 if region_weights[slot] >= 0.1 {
-                    region_margins[region_count] =
-                        region_signed[slot] / region_weights[slot];
+                    region_margins[region_count] = region_signed[slot] / region_weights[slot];
                     region_count += 1;
                 }
             }
@@ -1581,7 +1743,7 @@ fn robust_known_header_bits() -> &'static Vec<(usize, bool)> {
 // 将当前读取配置字节加入几何导频，是为了在无需解出完整头的阶段区分新旧载波，并减少另一配置产生的偶然相关峰。
 // Adding the active profile byte to the geometric pilot distinguishes new and legacy carriers before full header recovery and reduces accidental peaks from the other profile.
 fn geometry_known_header_bits(qim_profile: u8) -> &'static Vec<(usize, bool)> {
-    static PROFILE_BITS: OnceLock<[Vec<(usize, bool)>; 2]> = OnceLock::new();
+    static PROFILE_BITS: OnceLock<[Vec<(usize, bool)>; 4]> = OnceLock::new();
     let profiles = PROFILE_BITS.get_or_init(|| {
         std::array::from_fn(|profile| {
             let mut known = robust_known_header_bits().to_vec();
@@ -1594,7 +1756,22 @@ fn geometry_known_header_bits(qim_profile: u8) -> &'static Vec<(usize, bool)> {
             known
         })
     });
-    &profiles[usize::from(qim_profile.min(dwt_qim::QIM_PROFILE_PYRAMID))]
+    &profiles[usize::from(qim_profile.min(dwt_qim::QIM_PROFILE_SYNC))]
+}
+
+fn recovery_header_bits(profile: u8) -> Vec<(usize, bool)> {
+    let mut known = geometry_known_header_bits(profile).clone();
+    // 单密钥的公开盐值可加强盲配准，但无密钥文件的密码模式仍使用公共同步位，不能依赖未知正文。
+    // A single key's public salt strengthens blind registration; password mode still uses public synchronization bits without depending on unknown payload text.
+    if let Some(salt) = recovery::expected_salt() {
+        known.extend(
+            bytes_to_bits(&salt)
+                .into_iter()
+                .enumerate()
+                .map(|(index, bit)| (48 + index, bit)),
+        );
+    }
+    known
 }
 
 fn robust_header_signature_score(bits: &[bool]) -> f32 {
@@ -1609,10 +1786,10 @@ fn robust_header_signature_score(bits: &[bool]) -> f32 {
     matches as f32 / known.len() as f32
 }
 
-fn decode_or_repair_robust_header(
-    bits: &[bool],
-    reliabilities: &[f32],
-) -> Option<RobustHeader> {
+fn decode_or_repair_robust_header(bits: &[bool], reliabilities: &[f32]) -> Option<RobustHeader> {
+    if recovery::stopped() {
+        return None;
+    }
     if let Ok(header) = RobustHeader::from_bytes(&bits_to_bytes(bits)) {
         return Some(header);
     }
@@ -1645,6 +1822,9 @@ fn decode_or_repair_robust_header(
     }
     if HEADER_REPAIR_MAX_FLIPS >= 3 {
         for first in 0..weak.len() {
+            if recovery::stopped() {
+                return None;
+            }
             for second in first + 1..weak.len() {
                 for third in second + 1..weak.len() {
                     let mut repaired = bits.to_vec();
@@ -1660,6 +1840,9 @@ fn decode_or_repair_robust_header(
     }
     if HEADER_REPAIR_MAX_FLIPS >= 4 {
         for first in 0..weak.len() {
+            if recovery::stopped() {
+                return None;
+            }
             for second in first + 1..weak.len() {
                 for third in second + 1..weak.len() {
                     for fourth in third + 1..weak.len() {
@@ -1681,26 +1864,6 @@ fn decode_or_repair_robust_header(
     None
 }
 
-#[allow(dead_code)]
-struct ScaleLayerScores {
-    priority: Vec<GeometryCandidate>,
-    coarse: Vec<GeometryCandidate>,
-    refined: Vec<GeometryCandidate>,
-    fine: Vec<GeometryCandidate>,
-}
-
-impl ScaleLayerScores {
-    #[allow(dead_code)]
-    fn empty() -> Self {
-        Self {
-            priority: Vec::new(),
-            coarse: Vec::new(),
-            refined: Vec::new(),
-            fine: Vec::new(),
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn search_scale_geometry_layers(
     source: &RgbaImage,
@@ -1711,50 +1874,14 @@ fn search_scale_geometry_layers(
     credential_error: &mut Option<CoreError>,
     on_progress: &mut Option<&mut dyn FnMut(GeometrySearchProgress) -> Result<()>>,
     progress_current: &mut usize,
-) -> Result<(Option<ExtractReport>, ScaleLayerScores)> {
-    let priority = score_geometry_parameters(
-        source,
-        period_aligned_scale_parameters(
-            source.width(),
-            source.height(),
-            priority_scale_parameters(),
-        )
-        .into_iter()
-        .map(|scale| (0.0, scale)),
-        2,
-        320,
-        "resize-priority",
-        on_progress,
-        progress_current,
-    )?;
-    if let Some(report) = try_geometry_candidates(
-        source,
-        actual_width,
-        actual_height,
-        key_source,
-        &priority,
-        attempted,
-        credential_error,
-        "resize-priority",
-        on_progress,
-        progress_current,
-    )? {
-        return Ok((
-            Some(report),
-            ScaleLayerScores {
-                priority,
-                coarse: Vec::new(),
-                refined: Vec::new(),
-                fine: Vec::new(),
-            },
-        ));
-    }
-
-    // 粗搜步长用 1.04 且相位步长为 2，是因为微信类压缩分辨率很少落在整齐倍数上，4 像素相位会把已经错位的块周期再抽样得更稀。
-    // Coarse search uses 1.04 steps and a 2-pixel phase so WeChat-style compressed resolutions that miss exact multiples are not undersampled by a 4-pixel phase on an already shifted grid.
+) -> Result<Option<ExtractReport>> {
+    // 深入恢复使用连续网格的实际评分，不再为指定倍率设置优先通道；精化只围绕有证据的峰展开。
+    // Deep recovery uses measured scores on a continuous grid rather than privileged fixed scales; refinement follows only evidence-backed peaks.
     let coarse = score_geometry_parameters(
         source,
-        coarse_scale_parameters().into_iter().map(|scale| (0.0, scale)),
+        coarse_scale_parameters()
+            .into_iter()
+            .map(|scale| (0.0, scale)),
         2,
         288,
         "resize-coarse",
@@ -1773,58 +1900,27 @@ fn search_scale_geometry_layers(
         on_progress,
         progress_current,
     )? {
-        return Ok((
-            Some(report),
-            ScaleLayerScores {
-                priority,
-                coarse,
-                refined: Vec::new(),
-                fine: Vec::new(),
-            },
-        ));
+        return Ok(Some(report));
     }
 
-    let mut scale_seeds = Vec::new();
-    extend_unique_geometry_candidates(&mut scale_seeds, priority.iter().copied());
-    extend_unique_geometry_candidates(&mut scale_seeds, coarse.iter().copied());
-    scale_seeds.sort_by(compare_geometry_candidates);
-    scale_seeds.sort_by(compare_geometry_candidates);
-    scale_seeds.truncate(8);
-    // 截断之后再补回常见上采样校正，避免按分数排序时 2×/4× 噪声把 1.5× 挤出精化种子。
-    // Forced upsample corrections are appended after truncation so 2×/4× noise cannot push 1.5× out of the refine seeds during score sorting.
-    for scale in [1.25_f32, 1.5, 2.0, 3.0, 4.0] {
-        if let Some(candidate) = priority
-            .iter()
-            .chain(coarse.iter())
-            .find(|candidate| (candidate.scale - scale).abs() < 0.03)
-        {
-            extend_unique_geometry_candidates(&mut scale_seeds, [*candidate]);
-        }
-    }
-
-    // 别扭比例的缩小图在粗网格上往往只有弱峰；若再用 0.0035 门槛挡住精化，正确块周期就永远进不了物化解码。
-    // Awkward downscales often produce only weak coarse peaks; gating refinement at 0.0035 would keep the true block period from ever being materialized.
-    let refined = if scale_seeds.is_empty() {
-        Vec::new()
-    } else {
-        score_geometry_parameters(
-            source,
-            period_aligned_scale_parameters(
-                source.width(),
-                source.height(),
-                scale_seeds.iter().flat_map(|candidate| {
-                    (-4..=4).map(move |step| candidate.scale * (1.0 + step as f32 * 0.02))
-                }),
-            )
-            .into_iter()
-            .map(|scale| (0.0, scale)),
-            2,
-            320,
-            "resize-refine",
-            on_progress,
-            progress_current,
-        )?
-    };
+    let seeds = coarse.iter().take(8);
+    let refined = score_geometry_parameters(
+        source,
+        period_aligned_scale_parameters(
+            source.width(),
+            source.height(),
+            seeds.flat_map(|candidate| {
+                (-4..=4).map(move |step| candidate.scale * (1.0 + step as f32 * 0.02))
+            }),
+        )
+        .into_iter()
+        .map(|scale| (0.0, scale)),
+        2,
+        320,
+        "resize-refine",
+        on_progress,
+        progress_current,
+    )?;
     if let Some(report) = try_geometry_candidates(
         source,
         actual_width,
@@ -1837,39 +1933,26 @@ fn search_scale_geometry_layers(
         on_progress,
         progress_current,
     )? {
-        return Ok((
-            Some(report),
-            ScaleLayerScores {
-                priority,
-                coarse,
-                refined,
-                fine: Vec::new(),
-            },
-        ));
+        return Ok(Some(report));
     }
-
-    let fine = if refined.is_empty() {
-        Vec::new()
-    } else {
-        score_geometry_parameters(
-            source,
-            period_aligned_scale_parameters(
-                source.width(),
-                source.height(),
-                refined.iter().take(3).flat_map(|candidate| {
-                    (-5..=5).map(move |step| candidate.scale * (1.0 + step as f32 * 0.003))
-                }),
-            )
-            .into_iter()
-            .map(|scale| (0.0, scale)),
-            1,
-            416,
-            "resize-fine",
-            on_progress,
-            progress_current,
-        )?
-    };
-    if let Some(report) = try_geometry_candidates(
+    let fine = score_geometry_parameters(
+        source,
+        period_aligned_scale_parameters(
+            source.width(),
+            source.height(),
+            refined.iter().take(3).flat_map(|candidate| {
+                (-5..=5).map(move |step| candidate.scale * (1.0 + step as f32 * 0.003))
+            }),
+        )
+        .into_iter()
+        .map(|scale| (0.0, scale)),
+        1,
+        416,
+        "resize-fine",
+        on_progress,
+        progress_current,
+    )?;
+    try_geometry_candidates(
         source,
         actual_width,
         actual_height,
@@ -1880,27 +1963,7 @@ fn search_scale_geometry_layers(
         "resize-fine",
         on_progress,
         progress_current,
-    )? {
-        return Ok((
-            Some(report),
-            ScaleLayerScores {
-                priority,
-                coarse,
-                refined,
-                fine,
-            },
-        ));
-    }
-
-    Ok((
-        None,
-        ScaleLayerScores {
-            priority,
-            coarse,
-            refined,
-            fine,
-        },
-    ))
+    )
 }
 
 fn wrap_rotation_degrees(degrees: f32) -> f32 {
@@ -1953,8 +2016,14 @@ fn select_separated_peaks(
     let mut selected: Vec<GeometryCandidate> = Vec::new();
     // 2° 真峰稀疏分可能低于 30°/150° 谐波；每个布局先锁一个 |θ|≤8° 的近零峰。
     // A true 2° peak can score below 30°/150° harmonics; lock one |θ|≤8° near-zero peak per layout first.
-    for candidate in scored.iter().filter(|candidate| candidate.rotation_degrees.abs() <= 8.0) {
-        if selected.iter().any(|existing| existing.layout == candidate.layout) {
+    for candidate in scored
+        .iter()
+        .filter(|candidate| candidate.rotation_degrees.abs() <= 8.0)
+    {
+        if selected
+            .iter()
+            .any(|existing| existing.layout == candidate.layout)
+        {
             continue;
         }
         selected.push(*candidate);
@@ -2062,162 +2131,6 @@ fn search_narrowed_rotation(
     on_progress: &mut Option<&mut dyn FnMut(GeometrySearchProgress) -> Result<()>>,
     progress_current: &mut usize,
 ) -> Result<Option<ExtractReport>> {
-    // 编辑器常把 AABB 旋转后再裁回原图高度，只剩左右白边；这些候选必须先于铺满裁切，否则 10MP 相机会在 ±7° 铺满上耗尽时间。
-    // Editors often AABB-rotate then crop back to the original height, leaving only left/right pads; these candidates must run before fill-crop or a 10MP photo spends its budget on ±7° cover undos.
-    let mut axis_crop_probes = Vec::new();
-    for angle in [-2.0_f32, 2.0, -2.3, 2.3] {
-        axis_crop_probes.push(GeometryCandidate {
-            rotation_degrees: angle,
-            scale: 1.0,
-            layout: GeometryLayout::AabbHeightKept,
-            score: 1.0,
-        });
-        axis_crop_probes.push(GeometryCandidate {
-            rotation_degrees: angle,
-            scale: 1.0,
-            layout: GeometryLayout::AabbWidthKept,
-            score: 1.0,
-        });
-    }
-    if let Some(report) = try_geometry_candidates(
-        source,
-        actual_width,
-        actual_height,
-        key_source,
-        &axis_crop_probes,
-        attempted,
-        credential_error,
-        "rotation-range-narrow",
-        on_progress,
-        progress_current,
-    )? {
-        return Ok(Some(report));
-    }
-
-    // 铺满裁切先按列表顺序物化覆盖倒数，避免稀疏评分把 ±7° 挤出前八名后再对错误小角做全图验证。
-    // Fill-crop materializes cover reciprocals in list order first so sparse scores cannot drop ±7° out of the top eight and then spend full warps on false small angles.
-    let fill_seven = fill_crop_cover_undo_candidates(source);
-    if let Some(report) = try_geometry_candidates(
-        source,
-        actual_width,
-        actual_height,
-        key_source,
-        &fill_seven,
-        attempted,
-        credential_error,
-        "rotation-fill-forced",
-        on_progress,
-        progress_current,
-    )? {
-        return Ok(Some(report));
-    }
-
-    let mut trim_probes = Vec::new();
-    // 裁掉白边后既不是 ExpandedCanvas 也常不是 TightBounds；7°+1.03 导出裁边后要用 Standard 的 0.97 收回内容尺度。
-    // After trimming white pads the canvas is often neither ExpandedCanvas nor TightBounds; a 7°+1.03 export needs Standard at 0.97 to restore content scale.
-    for angle in [-7.0_f32, 7.0, -2.0, 2.0] {
-        for scale in [0.97_f32, 1.0, 1.03] {
-            trim_probes.push(GeometryCandidate {
-                rotation_degrees: angle,
-                scale,
-                layout: GeometryLayout::Standard,
-                score: 1.0,
-            });
-        }
-        for scale in [1.03_f32, 1.0, 0.97] {
-            trim_probes.push(GeometryCandidate {
-                rotation_degrees: angle,
-                scale,
-                layout: GeometryLayout::TightBounds,
-                score: 1.0,
-            });
-        }
-    }
-    if let Some(report) = try_geometry_candidates(
-        source,
-        actual_width,
-        actual_height,
-        key_source,
-        &trim_probes,
-        attempted,
-        credential_error,
-        "rotation-fill-forced",
-        on_progress,
-        progress_current,
-    )? {
-        return Ok(Some(report));
-    }
-
-    let fill_small = fill_crop_small_angle_undo_candidates(source);
-    if let Some(report) = try_geometry_candidates(
-        source,
-        actual_width,
-        actual_height,
-        key_source,
-        &fill_small,
-        attempted,
-        credential_error,
-        "rotation-fill-forced",
-        on_progress,
-        progress_current,
-    )? {
-        return Ok(Some(report));
-    }
-
-    let mut pad_probes = Vec::new();
-    for angle in [-2.0_f32, 2.0, -7.0, 7.0, -17.3, 17.3, -41.7, 41.7, -1.0, 1.0] {
-        pad_probes.push(GeometryCandidate {
-            rotation_degrees: angle,
-            scale: 1.0,
-            layout: GeometryLayout::AabbPadded,
-            score: 1.0,
-        });
-    }
-    for angle in [-2.0_f32, 2.0, -2.3, 2.3] {
-        pad_probes.push(GeometryCandidate {
-            rotation_degrees: angle,
-            scale: 1.0,
-            layout: GeometryLayout::AabbHeightKept,
-            score: 1.0,
-        });
-        pad_probes.push(GeometryCandidate {
-            rotation_degrees: angle,
-            scale: 1.0,
-            layout: GeometryLayout::AabbWidthKept,
-            score: 1.0,
-        });
-    }
-    for angle in [-7.0_f32, 7.0] {
-        for scale in [1.03_f32, 1.0, 0.97] {
-            pad_probes.push(GeometryCandidate {
-                rotation_degrees: angle,
-                scale,
-                layout: GeometryLayout::ExpandedCanvas,
-                score: 1.0,
-            });
-            pad_probes.push(GeometryCandidate {
-                rotation_degrees: angle,
-                scale,
-                layout: GeometryLayout::TightBounds,
-                score: 1.0,
-            });
-        }
-    }
-    if let Some(report) = try_geometry_candidates(
-        source,
-        actual_width,
-        actual_height,
-        key_source,
-        &pad_probes,
-        attempted,
-        credential_error,
-        "rotation-range-narrow",
-        on_progress,
-        progress_current,
-    )? {
-        return Ok(Some(report));
-    }
-
     let bin_scores = score_geometry_layout_parameters(
         source,
         rotation_bin_parameters(source, has_rotation_padding),
@@ -2309,11 +2222,7 @@ fn search_narrowed_rotation(
                     }
                 }
                 layout => {
-                    tenth_parameters.push((
-                        angle,
-                        scale_for_layout(source, angle, layout),
-                        layout,
-                    ));
+                    tenth_parameters.push((angle, scale_for_layout(source, angle, layout), layout));
                 }
             }
         }
@@ -2354,151 +2263,11 @@ fn search_narrowed_rotation(
         progress_current,
     )?;
 
+    // 只合并真正评分过的候选；不能把某个峰的分数复制给未经验证的固定倍率或布局。
+    // Merge only candidates that were actually scored; a peak's score cannot be copied to unmeasured fixed scales or layouts.
     let mut to_materialize = Vec::new();
-    for angle in [-2.0_f32, 2.0, -1.0, 1.0, -7.0, 7.0, -3.0, 3.0] {
-        let growth = rotation_canvas_growth(source.width(), source.height(), angle);
-        for extra in [0.955_f32, 1.0, 1.03] {
-            let scale = 1.0 / (growth * extra);
-            if (0.25..=4.0).contains(&scale) {
-                extend_unique_geometry_candidates(
-                    &mut to_materialize,
-                    [GeometryCandidate {
-                        rotation_degrees: angle,
-                        scale,
-                        layout: GeometryLayout::FixedCanvasFit,
-                        score: 1.0,
-                    }],
-                );
-            }
-        }
-        extend_unique_geometry_candidates(
-            &mut to_materialize,
-            [GeometryCandidate {
-                rotation_degrees: angle,
-                scale: 1.0,
-                layout: GeometryLayout::AabbPadded,
-                score: 1.0,
-            }],
-        );
-        for layout in [GeometryLayout::AabbHeightKept, GeometryLayout::AabbWidthKept] {
-            extend_unique_geometry_candidates(
-                &mut to_materialize,
-                [GeometryCandidate {
-                    rotation_degrees: angle,
-                    scale: 1.0,
-                    layout,
-                    score: 1.0,
-                }],
-            );
-        }
-        if has_rotation_padding {
-            extend_unique_geometry_candidates(
-                &mut to_materialize,
-                [GeometryCandidate {
-                    rotation_degrees: angle,
-                    scale: 1.0,
-                    layout: GeometryLayout::ExpandedCanvas,
-                    score: 1.0,
-                }],
-            );
-        }
-    }
-    for peak in &tenth_peaks {
-        match peak.layout {
-            GeometryLayout::AabbPadded
-            | GeometryLayout::AabbHeightKept
-            | GeometryLayout::AabbWidthKept
-            | GeometryLayout::ExpandedCanvas => {
-                for scale in [1.0_f32, 0.97, 1.03] {
-                    extend_unique_geometry_candidates(
-                        &mut to_materialize,
-                        [GeometryCandidate {
-                            rotation_degrees: peak.rotation_degrees,
-                            scale,
-                            layout: peak.layout,
-                            score: peak.score,
-                        }],
-                    );
-                }
-                let growth =
-                    rotation_canvas_growth(source.width(), source.height(), peak.rotation_degrees);
-                for extra in [1.0_f32, 0.955, 1.03] {
-                    let scale = 1.0 / (growth * extra);
-                    if (0.25..=4.0).contains(&scale) {
-                        extend_unique_geometry_candidates(
-                            &mut to_materialize,
-                            [GeometryCandidate {
-                                rotation_degrees: peak.rotation_degrees,
-                                scale,
-                                layout: GeometryLayout::FixedCanvasFit,
-                                score: peak.score,
-                            }],
-                        );
-                    }
-                }
-            }
-            GeometryLayout::FixedCanvasFit => {
-                let growth =
-                    rotation_canvas_growth(source.width(), source.height(), peak.rotation_degrees);
-                for extra in [1.0_f32, 0.955, 1.03] {
-                    let scale = 1.0 / (growth * extra);
-                    if (0.25..=4.0).contains(&scale) {
-                        extend_unique_geometry_candidates(
-                            &mut to_materialize,
-                            [GeometryCandidate {
-                                rotation_degrees: peak.rotation_degrees,
-                                scale,
-                                layout: GeometryLayout::FixedCanvasFit,
-                                score: peak.score,
-                            }],
-                        );
-                    }
-                }
-                extend_unique_geometry_candidates(
-                    &mut to_materialize,
-                    [GeometryCandidate {
-                        rotation_degrees: peak.rotation_degrees,
-                        scale: 1.0,
-                        layout: GeometryLayout::AabbPadded,
-                        score: peak.score,
-                    }],
-                );
-                for layout in [GeometryLayout::AabbHeightKept, GeometryLayout::AabbWidthKept] {
-                    extend_unique_geometry_candidates(
-                        &mut to_materialize,
-                        [GeometryCandidate {
-                            rotation_degrees: peak.rotation_degrees,
-                            scale: 1.0,
-                            layout,
-                            score: peak.score,
-                        }],
-                    );
-                }
-            }
-            _ => {
-                extend_unique_geometry_candidates(&mut to_materialize, [*peak]);
-                let mut sibling = Vec::new();
-                extend_rotation_dual_layout_parameters(
-                    &mut sibling,
-                    source,
-                    peak.rotation_degrees,
-                    has_rotation_padding,
-                );
-                for (rotation_degrees, scale, layout) in sibling {
-                    extend_unique_geometry_candidates(
-                        &mut to_materialize,
-                        [GeometryCandidate {
-                            rotation_degrees,
-                            scale,
-                            layout,
-                            score: peak.score,
-                        }],
-                    );
-                }
-            }
-        }
-    }
-    extend_unique_geometry_candidates(&mut to_materialize, hundredth_scores.iter().copied().take(3));
+    extend_unique_geometry_candidates(&mut to_materialize, tenth_scores);
+    extend_unique_geometry_candidates(&mut to_materialize, hundredth_scores);
     try_geometry_candidates(
         source,
         actual_width,
@@ -2511,192 +2280,6 @@ fn search_narrowed_rotation(
         on_progress,
         progress_current,
     )
-}
-
-fn luma_profile_row(source: &RgbaImage) -> Vec<f32> {
-    let width = source.width() as usize;
-    let height = source.height() as usize;
-    let mut profile = vec![0.0_f32; width.max(1)];
-    if width < 32 || height < 32 {
-        return profile;
-    }
-    let row_start = height / 4;
-    let row_end = (height * 3 / 4).max(row_start + 1);
-    let row_step = ((row_end - row_start) / 16).max(1);
-    let mut rows = 0_f32;
-    for y in (row_start..row_end).step_by(row_step) {
-        for x in 0..width {
-            let pixel = source.get_pixel(x as u32, y as u32);
-            profile[x] += 0.299 * pixel[0] as f32 + 0.587 * pixel[1] as f32 + 0.114 * pixel[2] as f32;
-        }
-        rows += 1.0;
-    }
-    if rows > 0.0 {
-        for value in &mut profile {
-            *value /= rows;
-        }
-    }
-    let mean = profile.iter().sum::<f32>() / profile.len().max(1) as f32;
-    for value in &mut profile {
-        *value -= mean;
-    }
-    profile
-}
-
-fn luma_profile_column(source: &RgbaImage) -> Vec<f32> {
-    let width = source.width() as usize;
-    let height = source.height() as usize;
-    let mut profile = vec![0.0_f32; height.max(1)];
-    if width < 32 || height < 32 {
-        return profile;
-    }
-    let col_start = width / 4;
-    let col_end = (width * 3 / 4).max(col_start + 1);
-    let col_step = ((col_end - col_start) / 16).max(1);
-    let mut cols = 0_f32;
-    for x in (col_start..col_end).step_by(col_step) {
-        for y in 0..height {
-            let pixel = source.get_pixel(x as u32, y as u32);
-            profile[y] += 0.299 * pixel[0] as f32 + 0.587 * pixel[1] as f32 + 0.114 * pixel[2] as f32;
-        }
-        cols += 1.0;
-    }
-    if cols > 0.0 {
-        for value in &mut profile {
-            *value /= cols;
-        }
-    }
-    let mean = profile.iter().sum::<f32>() / profile.len().max(1) as f32;
-    for value in &mut profile {
-        *value -= mean;
-    }
-    profile
-}
-
-fn best_autocorr_lag(profile: &[f32]) -> Option<f32> {
-    if profile.len() < 48 {
-        return None;
-    }
-    let mut best_lag = 0_usize;
-    let mut best_score = f32::NEG_INFINITY;
-    for lag in 5..=16 {
-        if lag >= profile.len() / 4 {
-            break;
-        }
-        let mut acc = 0.0_f32;
-        let mut count = 0.0_f32;
-        for index in 0..profile.len() - lag {
-            acc += profile[index] * profile[index + lag];
-            count += 1.0;
-        }
-        let score = acc / count.max(1.0);
-        if score > best_score {
-            best_score = score;
-            best_lag = lag;
-        }
-    }
-    if best_lag == 0 {
-        None
-    } else {
-        Some(best_lag as f32)
-    }
-}
-
-fn estimate_observed_block_period(source: &RgbaImage) -> Option<f32> {
-    // 稀疏亮度自相关估八像素块周期；中心放大后周期变成 8×zoom，undo = 8 / observed。
-    // Sparse luma autocorrelation estimates the eight-pixel block period; after center zoom the period is 8×zoom, so undo = 8 / observed.
-    let row_lag = best_autocorr_lag(&luma_profile_row(source));
-    let col_lag = best_autocorr_lag(&luma_profile_column(source));
-    match (row_lag, col_lag) {
-        (Some(row), Some(col)) => Some((row + col) * 0.5),
-        (Some(lag), None) | (None, Some(lag)) => Some(lag),
-        (None, None) => None,
-    }
-}
-
-fn center_zoom_undo_grid() -> Vec<f32> {
-    let mut scales = Vec::new();
-    let mut scale = 0.50_f32;
-    while scale <= 0.98001 {
-        scales.push((scale * 100.0).round() / 100.0);
-        scale += 0.02;
-    }
-    scales
-}
-
-fn push_unique_center_zoom_undo(target: &mut Vec<f32>, scale: f32) {
-    if !(0.50..=0.98).contains(&scale) || !scale.is_finite() {
-        return;
-    }
-    if target
-        .iter()
-        .any(|existing| (*existing - scale).abs() < 0.01)
-    {
-        return;
-    }
-    target.push(scale);
-}
-
-fn period_aligned_center_zoom_undos(source: &RgbaImage) -> Vec<f32> {
-    let grid = center_zoom_undo_grid();
-    let mut undos = Vec::new();
-    for scale in [1.0 / 2.0, 1.0 / 1.5, 1.0 / 1.25, 1.0 / 1.1] {
-        push_unique_center_zoom_undo(&mut undos, scale);
-    }
-    if let Some(observed) = estimate_observed_block_period(source) {
-        let seed = (BLOCK_SIZE as f32 / observed).clamp(0.50, 0.98);
-        push_unique_center_zoom_undo(&mut undos, seed);
-        if let Some(index) = grid.iter().enumerate().min_by(|(_, left), (_, right)| {
-            (**left - seed)
-                .abs()
-                .partial_cmp(&(**right - seed).abs())
-                .unwrap_or(Ordering::Equal)
-        }) {
-            let start = index.0.saturating_sub(2);
-            let end = (index.0 + 2).min(grid.len().saturating_sub(1));
-            for neighbor in &grid[start..=end] {
-                push_unique_center_zoom_undo(&mut undos, *neighbor);
-            }
-        }
-    }
-    undos
-}
-
-fn remaining_center_zoom_undos(seeds: &[f32]) -> Vec<f32> {
-    let seed = seeds.first().copied().unwrap_or(0.80);
-    let mut remaining = Vec::new();
-    for scale in center_zoom_undo_grid() {
-        if seeds.iter().any(|existing| (*existing - scale).abs() < 0.01) {
-            continue;
-        }
-        remaining.push(scale);
-    }
-    remaining.sort_by(|left, right| {
-        (*left - seed)
-            .abs()
-            .partial_cmp(&(*right - seed).abs())
-            .unwrap_or(Ordering::Equal)
-    });
-    remaining
-}
-
-fn center_zoom_geometry_candidates(scales: &[f32]) -> Vec<GeometryCandidate> {
-    let mut candidates = Vec::new();
-    for &scale in scales {
-        candidates.push(GeometryCandidate {
-            rotation_degrees: 0.0,
-            scale,
-            layout: GeometryLayout::Standard,
-            score: 1.0,
-        });
-        candidates.push(GeometryCandidate {
-            rotation_degrees: 0.0,
-            scale,
-            layout: GeometryLayout::CenterZoom,
-            score: 1.0,
-        });
-    }
-    candidates
 }
 
 fn canvas_matches_public_header(source: &RgbaImage) -> bool {
@@ -2720,41 +2303,6 @@ fn search_and_extract_geometry(
     let mut credential_error = None;
     let has_rotation_padding = sync::has_uniform_rotation_padding(source);
 
-    let center_zoom_seeds = period_aligned_center_zoom_undos(source);
-    let center_zoom = center_zoom_geometry_candidates(&center_zoom_seeds);
-    // 中心放大再裁回会留下白角，补边检测常误判；CenterZoom 必须先于公开头缩放，否则 resize-header 会把 0.80 改写成 0.5×/2×。
-    // Center-zoom-then-crop leaves white corners that look like padding; CenterZoom must run before header-guided resize or resize-header rewrites 0.80 into 0.5×/2×.
-    if let Some(report) = try_geometry_candidates(
-        source,
-        actual_width,
-        actual_height,
-        key_source,
-        &center_zoom,
-        &mut attempted,
-        &mut credential_error,
-        "center-zoom",
-        on_progress,
-        progress_current,
-    )? {
-        return Ok(Some(report));
-    }
-    let center_zoom_grid =
-        center_zoom_geometry_candidates(&remaining_center_zoom_undos(&center_zoom_seeds));
-    if let Some(report) = try_geometry_candidates(
-        source,
-        actual_width,
-        actual_height,
-        key_source,
-        &center_zoom_grid,
-        &mut attempted,
-        &mut credential_error,
-        "center-zoom-grid",
-        on_progress,
-        progress_current,
-    )? {
-        return Ok(Some(report));
-    }
-
     let header_guided_scales = header_guided_scale_candidates(source);
     if let Some(report) = try_geometry_candidates(
         source,
@@ -2773,30 +2321,108 @@ fn search_and_extract_geometry(
         return Ok(Some(report));
     }
 
-    // 90°/270° 只需要三个精确候选，而且交换宽高后可直接恢复完整网格；即便没有白边也先于缩放搜索，避免无补边的直角旋转先为空跑一整轮分辨率恢复。
-    // Quarter turns need only three exact candidates and restore the grid once width and height are swapped; they run before scale search even without padding so a bare 90° image does not pay a full resolution sweep first.
-    let orientations = score_geometry_parameters(
-        source,
-        orientation_angle_parameters().into_iter().map(|angle| (angle, 1.0)),
-        1,
-        320,
-        "orientation",
-        on_progress,
-        progress_current,
-    )?;
-    if let Some(report) = try_geometry_candidates(
+    let mut guided = Vec::new();
+    for hint in sync::padding_hints(source) {
+        guided.push((hint.angle, 1.0, hint.confidence, None));
+    }
+    for &(angle, _, confidence, _) in &guided {
+        let slope = angle.to_radians().tan();
+        let transform =
+            sync::AffineTransform::horizontal_shear(source.width(), source.height(), slope)
+                .unwrap();
+        let corrected =
+            sync::materialize_transform_checked(source, &transform, recovery::checkpoint)?.unwrap();
+        let registration = SyncRegistration {
+            rotation_degrees: 0.0,
+            scale: 1.0,
+            translation_x: 0,
+            translation_y: 0,
+            score: confidence,
+            shear_x: slope,
+            mirrored: false,
+        };
+        *progress_current += 1;
+        if let Some(callback) = on_progress.as_deref_mut() {
+            callback(GeometrySearchProgress::scoring(
+                *progress_current,
+                angle,
+                1.0,
+                "rotation-padding-hint",
+                1,
+                true,
+            ))?;
+        }
+        match extract_registered_image(
+            &DynamicImage::ImageRgba8(corrected),
+            actual_width,
+            actual_height,
+            key_source,
+            registration,
+        ) {
+            Ok(report) => return Ok(Some(report)),
+            Err(error @ CoreError::Cancelled) | Err(error @ CoreError::RecoveryTimeout) => {
+                return Err(error)
+            }
+            Err(_) => {}
+        }
+    }
+    if let Some(report) = try_measured_transforms(
         source,
         actual_width,
         actual_height,
         key_source,
-        &orientations,
-        &mut attempted,
-        &mut credential_error,
-        "orientation",
+        &guided,
         on_progress,
         progress_current,
     )? {
         return Ok(Some(report));
+    }
+    let spectral = crate::spectral::grid_hints(source)?;
+    let hints: Vec<_> = spectral
+        .into_iter()
+        .take(4)
+        .flat_map(|hint| {
+            // 能量谱可能突出块周期的二次谐波，两个尺度都必须接受真实头验证，不能把最高峰直接当作基本周期。
+            // Energy spectra may emphasize the lattice's second harmonic; both scales require real-header validation instead of treating the tallest peak as the fundamental.
+            [hint.scale * 0.5, hint.scale]
+                .into_iter()
+                .filter(|scale| (0.25..=4.0).contains(scale))
+                .map(move |scale| (hint.angle, scale, hint.score, None))
+        })
+        .collect();
+    if let Some(report) = try_measured_transforms(
+        source,
+        actual_width,
+        actual_height,
+        key_source,
+        &hints,
+        on_progress,
+        progress_current,
+    )? {
+        return Ok(Some(report));
+    }
+    // 默认编码没有实验导频，先验证现有块周期，避免天然纹理偶合实验模板时延误历史图片。
+    // Default encodes have no experimental pilot; verify the existing block lattice first so natural template coincidences do not delay historical images.
+    let pilot = crate::pilot::hints(source)?;
+    let pilot_hints: Vec<_> = pilot
+        .into_iter()
+        .map(|hint| (hint.angle, hint.scale, hint.score, hint.offset))
+        .collect();
+    if let Some(report) = try_measured_transforms(
+        source,
+        actual_width,
+        actual_height,
+        key_source,
+        &pilot_hints,
+        on_progress,
+        progress_current,
+    )? {
+        return Ok(Some(report));
+    }
+    // 无可靠几何先验时，大范围盲搜留给用户明确选择的深入恢复，避免普通失败图片耗尽默认预算。
+    // Broad blind search without a reliable geometric prior belongs to explicit deep recovery, keeping ordinary failures from exhausting the standard budget.
+    if !recovery::is_deep() {
+        return Ok(None);
     }
 
     // 身份即便是“强导频但正文损坏”，旋转图仍可能在未校正网格上扫到假强导频；±180° 梯子必须继续跑。
@@ -2819,7 +2445,7 @@ fn search_and_extract_geometry(
     if !has_rotation_padding && (!prefer_identity_damage || same_canvas_header) {
         // 同画布中心放大常把身份判成正文损坏；画布尺寸仍与公开头一致时必须继续跑缩放层。
         // Same-canvas center zoom often leaves identity as PayloadCorrupted; scale layers still run when the canvas matches the public header.
-        let (report, _layers) = search_scale_geometry_layers(
+        let report = search_scale_geometry_layers(
             source,
             actual_width,
             actual_height,
@@ -2842,6 +2468,115 @@ fn search_and_extract_geometry(
     Ok(None)
 }
 
+fn try_measured_transforms(
+    source: &RgbaImage,
+    actual_width: u32,
+    actual_height: u32,
+    key_source: &KeySource,
+    hints: &[(f32, f32, f32, Option<(f32, f32)>)],
+    on_progress: &mut Option<&mut dyn FnMut(GeometrySearchProgress) -> Result<()>>,
+    progress_current: &mut usize,
+) -> Result<Option<ExtractReport>> {
+    let reflected = imageops::flip_horizontal(source);
+    for &(measured_angle, scale, score, measured_origin) in hints.iter().take(8) {
+        for quarter in [0.0, 180.0, 90.0, -90.0] {
+            for mirrored in [false, true] {
+                let source = if mirrored { &reflected } else { source };
+                let angle = wrap_rotation_degrees(if mirrored {
+                    -(measured_angle + quarter)
+                } else {
+                    measured_angle + quarter
+                });
+                let origin = if mirrored || quarter != 0.0 {
+                    None
+                } else {
+                    measured_origin
+                };
+                recovery::checkpoint()?;
+                // 测得的几何先验先恢复内容尺度，输出画布和原点由通过 CRC 的头决定，避免假定裁边仍围绕中心。
+                // Measured geometry first restores content scale; a CRC-valid header determines the original canvas and origin instead of assuming centered crops.
+                for (dx, dy) in [
+                    (0.0, 0.0),
+                    (0.5, 0.0),
+                    (0.0, 0.5),
+                    (0.5, 0.5),
+                    (-0.5, 0.0),
+                    (0.0, -0.5),
+                    (-0.5, -0.5),
+                ] {
+                    if std::env::var_os("PWC_GEOMETRY_DIAGNOSTICS").is_some() {
+                        eprintln!("verify geometry angle={angle} scale={scale} offset={dx},{dy} mirrored={mirrored}");
+                    }
+                    let Some(transform) = sync::AffineTransform::registered(
+                        source.width(),
+                        source.height(),
+                        angle,
+                        scale,
+                        dx,
+                        dy,
+                    ) else {
+                        continue;
+                    };
+                    let transform = if let Some((x, y)) = origin {
+                        transform.shifted_origin(x, y)
+                    } else {
+                        transform
+                    };
+                    *progress_current += 1;
+                    if let Some(callback) = on_progress.as_deref_mut() {
+                        callback(GeometrySearchProgress::scoring(
+                            *progress_current,
+                            angle,
+                            scale,
+                            "rotation-padding-hint",
+                            1,
+                            true,
+                        ))?;
+                    }
+                    let Some(corrected) = sync::materialize_transform_checked(
+                        source,
+                        &transform,
+                        recovery::checkpoint,
+                    )?
+                    else {
+                        continue;
+                    };
+                    let registration = SyncRegistration {
+                        rotation_degrees: angle,
+                        scale,
+                        translation_x: 0,
+                        translation_y: 0,
+                        score,
+                        shear_x: 0.0,
+                        mirrored,
+                    };
+                    let mut evidence = 0.0;
+                    match extract_registered_image_with_evidence(
+                        &DynamicImage::ImageRgba8(corrected),
+                        actual_width,
+                        actual_height,
+                        key_source,
+                        registration,
+                        &mut evidence,
+                    ) {
+                        Ok(report) => return Ok(Some(report)),
+                        Err(error @ CoreError::Cancelled)
+                        | Err(error @ CoreError::RecoveryTimeout)
+                        | Err(error @ CoreError::SaltMismatch) => return Err(error),
+                        Err(CoreError::HeaderNotFound)
+                            if evidence < HEADER_DAMAGE_EVIDENCE_MIN_SCORE =>
+                        {
+                            break
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_geometry_candidates(
     source: &RgbaImage,
@@ -2851,188 +2586,37 @@ fn try_geometry_candidates(
     candidates: &[GeometryCandidate],
     attempted: &mut Vec<GeometryCandidate>,
     credential_error: &mut Option<CoreError>,
-    stage: &'static str,
+    _stage: &'static str,
     on_progress: &mut Option<&mut dyn FnMut(GeometrySearchProgress) -> Result<()>>,
     _progress_current: &mut usize,
 ) -> Result<Option<ExtractReport>> {
-    let Some(best) = candidates.first() else {
-        return Ok(None);
-    };
-    let is_resize_stage = stage.starts_with("resize");
-    let is_padding_hint_stage = stage.starts_with("rotation-padding")
-        && stage != "rotation-padding-forced";
-    let is_forced_padding_stage = stage == "rotation-padding-forced"
-        || stage == "rotation-fill-forced";
-    let is_narrowed_rotation_stage = stage == "rotation-range-narrow";
-    let is_center_zoom_stage = stage == "center-zoom";
-    let is_center_zoom_grid_stage = stage == "center-zoom-grid";
-    let is_targeted_rotation_stage = stage == "rotation-tight-priority"
-        || stage == "rotation-fixed-priority"
-        || stage.starts_with("rotation-refine")
-        || stage.starts_with("rotation-fine")
-        || stage.starts_with("rotation-resize-refine")
-        || stage.starts_with("rotation-resize-fine");
-    let minimum_score = if is_narrowed_rotation_stage || is_center_zoom_stage {
-        // 周期对齐的邻近 undo 必须全部物化；密网格仍走缩放门槛，避免整表以 0 分强行解码。
-        // Period-aligned nearby undos must all materialize; the dense grid keeps the resize floor so the whole table is not forced through at score zero.
-        0.0
-    } else if is_center_zoom_grid_stage {
-        GEOMETRY_RESIZE_DECODE_MIN_SCORE
-    } else if is_resize_stage {
-        // 压缩分辨率很少落在整齐的 2×/4× 上，稀疏导频在正确比例附近往往只有弱峰；把缩放解码门槛降到 0.004，才能让精化后的前四名进入完整头扫描。
-        // Compressed resolutions rarely land on exact 2×/4×, so the sparse pilot is often only a weak peak near the true scale; lowering the resize decode floor to 0.004 lets the refined top four enter a full header scan.
-        GEOMETRY_RESIZE_DECODE_MIN_SCORE
-    } else if is_padding_hint_stage {
-        GEOMETRY_RESIZE_DECODE_MIN_SCORE
-    } else if is_targeted_rotation_stage {
-        GEOMETRY_MIN_DECODE_SCORE * 0.65
-    } else {
-        GEOMETRY_MIN_DECODE_SCORE
-    };
-    if best.score < minimum_score {
-        return Ok(None);
-    }
-    let relative_ratio = if is_narrowed_rotation_stage || is_center_zoom_stage {
-        0.0
-    } else if is_center_zoom_grid_stage {
-        0.0
-    } else if is_resize_stage || is_padding_hint_stage {
-        0.28
-    } else if is_targeted_rotation_stage {
-        0.48
-    } else {
-        GEOMETRY_RELATIVE_DECODE_SCORE
-    };
-    let relative_cutoff = (best.score * relative_ratio).max(minimum_score);
-    let candidate_limit = if is_narrowed_rotation_stage {
-        40
-    } else if is_center_zoom_stage {
-        24
-    } else if is_center_zoom_grid_stage {
-        32
-    } else if is_forced_padding_stage {
-        32
-    } else if is_padding_hint_stage {
-        8
-    } else if is_resize_stage {
-        8
-    } else if is_targeted_rotation_stage {
-        3
-    } else if best.score >= GEOMETRY_STRONG_DECODE_SCORE {
-        GEOMETRY_STAGE_DECODE_CANDIDATES
-    } else if best.score >= GEOMETRY_MIN_DECODE_SCORE * 2.5 {
-        2
-    } else {
-        1
-    };
-    // 缩放、白边提示和已经由粗峰收敛出的旋转层拥有明确几何先验，因此允许少量弱峰进入完整验证；普通盲搜仍保持严格阈值，避免无水印图片在错误候选上反复生成整图。
-    // Resize, padding-hint, and rotation stages already converged from a coarse peak have explicit geometric priors, so a few weaker peaks may enter full verification; ordinary blind searches keep the strict threshold to avoid repeatedly materializing full images for unmarked inputs.
-    // 只有达到相对峰值阈值的少量候选才生成完整校正图，是因为稀疏评分很便宜，而错误候选的全图插值和完整头扫描才是旧版“卡在 180°”的主要耗时来源。
-    // Only a few candidates near the relative score peak are materialized because sparse scoring is cheap, while full-image interpolation and complete header scanning on false candidates caused the old apparent 180° stall.
-    let mut selected: Vec<GeometryCandidate> = candidates
-        .iter()
-        .copied()
-        .filter(|candidate| candidate.score >= relative_cutoff)
-        .take(candidate_limit)
-        .collect();
-    if is_resize_stage {
-        // 稀疏导频常把 0.62× 噪声排在真 1.52× 前面；解码列表以常见恢复倍数为主，并优先尝试 16 像素对齐的输出尺寸。
-        // Sparse pilots often rank 0.62× noise above the true 1.52×; the decode list is built from common restore multiples and prefers 16-pixel output sizes.
-        let mut restore = Vec::new();
-        for scale in [0.5_f32, 0.25, 2.0, 1.5, 1.25, 3.0, 4.0] {
-            if let Some(candidate) = candidates.iter().find(|candidate| {
-                candidate.score >= minimum_score && (candidate.scale - scale).abs() < 0.08
-            }) {
-                extend_unique_geometry_candidates(&mut restore, [*candidate]);
-            }
-        }
-        for candidate in candidates.iter().copied().take(3) {
-            extend_unique_geometry_candidates(&mut restore, [candidate]);
-        }
-        if restore.is_empty() {
-            restore = selected;
-        }
-        selected = expand_pixel_aligned_scale_candidates(source, &restore);
-        selected.sort_by(|left, right| {
-            header_period_cost(source, left)
-                .cmp(&header_period_cost(source, right))
-                .then_with(|| {
-                    restore_ratio_cost(left.scale)
-                        .partial_cmp(&restore_ratio_cost(right.scale))
-                        .unwrap_or(Ordering::Equal)
-                })
-        });
-        selected.truncate(12);
-    } else if is_padding_hint_stage {
-        // 白边提示下 FixedCanvasFit 噪声峰经常压过 ExpandedCanvas 的 0.97；解码必须先试扩展画布上的内容缩放，而不是只信导频排名。
-        // Under padding hints, FixedCanvasFit noise often outranks ExpandedCanvas at 0.97; decode must try expanded-canvas content zooms instead of trusting pilot rank alone.
-        let mut preferred = Vec::new();
-        for scale in [0.97_f32, 1.0, 1.03, 0.96, 0.92, 1.04, 1.08] {
-            for candidate in candidates.iter().copied().filter(|candidate| {
-                candidate.layout == GeometryLayout::ExpandedCanvas
-                    && candidate.score >= minimum_score
-                    && (candidate.scale - scale).abs() < 0.015
-            }).take(3) {
-                extend_unique_geometry_candidates(&mut preferred, [candidate]);
-            }
-        }
-        for candidate in candidates.iter().copied().filter(|candidate| {
-            candidate.layout == GeometryLayout::TightBounds
-                && candidate.score >= minimum_score
-                && (candidate.scale - 1.0).abs() <= 0.12
-        }).take(4) {
-            extend_unique_geometry_candidates(&mut preferred, [candidate]);
-        }
-        for candidate in candidates.iter().copied().take(3) {
-            extend_unique_geometry_candidates(&mut preferred, [candidate]);
-        }
-        if !preferred.is_empty() {
-            selected = preferred;
-            selected.truncate(12);
-        }
-    } else if stage == "rotation-fixed-priority" {
-        // 铺满裁切的校正尺度是覆盖系数的倒数；稀疏导频常把错误小角度排在真 7° 前面，但若先物化 4°–8° 共十张图，1° 真峰会被困在 64 相位头扫描后面。
-        // Fill-crop correction uses the reciprocal of the cover factor; sparse pilots often rank a wrong small angle above the true 7°, but materializing ten 4°–8° warps first traps a true 1° peak behind 64-phase header scans.
-        let mut preferred = Vec::new();
-        for candidate in candidates.iter().copied().take(3) {
-            extend_unique_geometry_candidates(&mut preferred, [candidate]);
-        }
-        for sign in [-1.0_f32, 1.0] {
-            let angle = 7.0 * sign;
-            let growth = rotation_canvas_growth(source.width(), source.height(), angle);
-            let undos = [1.0 / (growth * 1.03), 1.0 / growth, 1.0 / (growth * 1.05)];
-            for undo in undos {
-                if let Some(candidate) = candidates.iter().copied().find(|candidate| {
-                    candidate.layout == GeometryLayout::FixedCanvasFit
-                        && (candidate.rotation_degrees - angle).abs() < 0.15
-                        && (candidate.scale - undo).abs() < 0.02
-                }) {
-                    extend_unique_geometry_candidates(&mut preferred, [candidate]);
-                    break;
-                }
-            }
-        }
-        if !preferred.is_empty() {
-            selected = preferred;
-            selected.truncate(6);
-        }
-    }
-    // 评分计数封顶后仍可能物化多张大图；验证列表单独编号，界面才不会误以为 1025/1025 已经结束。
-    // After the scoring counter saturates, several large images may still be materialized; numbering the verify list separately keeps the UI from treating 1025/1025 as completion.
-    let verify_jobs: Vec<GeometryCandidate> = selected
-        .iter()
-        .copied()
-        .filter(|candidate| {
-            !contains_geometry_parameter(
+    // 去重和已尝试过滤必须在限额之前执行，否则重复种子会挤掉真正收敛的角度。
+    // Deduplication and attempted filtering precede the limit, or repeated seeds crowd out genuinely refined angles.
+    let mut unique = Vec::new();
+    for candidate in candidates.iter().copied() {
+        if candidate.score > 0.0
+            && !contains_geometry_parameter(
                 attempted,
                 candidate.rotation_degrees,
                 candidate.scale,
                 candidate.layout,
             )
-        })
+        {
+            extend_unique_geometry_candidates(&mut unique, [candidate]);
+        }
+    }
+    unique.sort_by(compare_geometry_candidates);
+    let threshold = unique
+        .first()
+        .map_or(1.0, |best| (best.score * 0.6).max(0.004));
+    let verify_jobs: Vec<_> = unique
+        .into_iter()
+        .filter(|candidate| candidate.score >= threshold)
+        .take(4)
         .collect();
     let verify_total = verify_jobs.len();
     for (verify_index, candidate) in verify_jobs.into_iter().enumerate() {
+        recovery::checkpoint()?;
         attempted.push(candidate);
         let transform = affine_for_geometry(
             source,
@@ -3114,6 +2698,8 @@ fn try_geometry_candidates(
             translation_x: 0,
             translation_y: 0,
             score: candidate.score,
+            shear_x: 0.0,
+            mirrored: false,
         };
         if let Some(callback) = on_progress.as_deref_mut() {
             // 插值完成后把头扫描标成该校正图的最后一段，避免大图 CRC 扫描期间进度条再次冻住。
@@ -3157,8 +2743,7 @@ fn try_geometry_candidates(
         };
         match extraction {
             Ok(report) => return Ok(Some(report)),
-            Err(error @ CoreError::SaltMismatch)
-            | Err(error @ CoreError::DecryptionFailed) => {
+            Err(error @ CoreError::SaltMismatch) | Err(error @ CoreError::DecryptionFailed) => {
                 if credential_error.is_none() {
                     *credential_error = Some(error);
                 }
@@ -3185,9 +2770,7 @@ where
         source,
         parameters
             .into_iter()
-            .map(|(rotation_degrees, scale)| {
-                (rotation_degrees, scale, GeometryLayout::Standard)
-            }),
+            .map(|(rotation_degrees, scale)| (rotation_degrees, scale, GeometryLayout::Standard)),
         pixel_phase_step,
         sample_budget,
         stage,
@@ -3211,9 +2794,9 @@ where
 {
     score_geometry_layout_parameters(
         source,
-        angles.into_iter().map(|angle| {
-            (angle, 1.0, GeometryLayout::ExpandedCanvas)
-        }),
+        angles
+            .into_iter()
+            .map(|angle| (angle, 1.0, GeometryLayout::ExpandedCanvas)),
         pixel_phase_step,
         sample_budget,
         stage,
@@ -3337,12 +2920,8 @@ where
                     true,
                 ))?;
             }
-            let score = geometry_signature_score(
-                source,
-                &transform,
-                pixel_phase_step,
-                sample_budget,
-            );
+            let score =
+                geometry_signature_score(source, &transform, pixel_phase_step, sample_budget);
             candidates.push(GeometryCandidate {
                 rotation_degrees,
                 scale,
@@ -3370,7 +2949,8 @@ where
                             break;
                         }
                         let index = next.fetch_add(1, AtomicOrdering::Relaxed);
-                        let Some((rotation_degrees, scale, layout, transform)) = work.get(index).copied()
+                        let Some((rotation_degrees, scale, layout, transform)) =
+                            work.get(index).copied()
                         else {
                             break;
                         };
@@ -3469,80 +3049,10 @@ where
         }
     }
 
+    // 保留评分结果到统一验证入口，再去重并排除已尝试项后限额；提前截断会让精化结果被旧候选挤掉。
+    // Keep scores until the shared verification entry deduplicates and removes attempted items before capping; early truncation can crowd refined results out.
     candidates.sort_by(compare_geometry_candidates);
-    if stage.starts_with("resize") {
-        // 缩放层的稀疏导频会在错误比例上冒出与真峰几乎一样高的噪声；截成 12 个会丢掉 640/421，因此额外保留靠近常见恢复倍数的候选。
-        // Sparse resize pilots produce false peaks almost as strong as the true period; truncating to 12 drops 640/421, so candidates near common restore multiples are kept as well.
-        let mut kept: Vec<GeometryCandidate> = candidates.iter().copied().take(12).collect();
-        for scale in [0.25_f32, 0.5, 1.25, 1.5, 1.6, 2.0, 3.0, 4.0] {
-            if let Some(candidate) = candidates
-                .iter()
-                .find(|candidate| (candidate.scale - scale).abs() < 0.08)
-            {
-                extend_unique_geometry_candidates(&mut kept, [*candidate]);
-            }
-        }
-        Ok(kept)
-    } else if stage == "rotation-fixed-priority" {
-        // 铺满裁切的真峰常被截断到 12 名之外；必须把覆盖系数倒数从完整评分表里捞回来，否则 7° 永远进不了物化。
-        // Fill-crop's true peak is often truncated out of the top twelve; the cover-factor reciprocal must be retrieved from the full score table or 7° never materializes.
-        let mut kept: Vec<GeometryCandidate> = candidates.iter().copied().take(12).collect();
-        for mut candidate in candidates.iter().copied() {
-            if candidate.layout != GeometryLayout::FixedCanvasFit {
-                continue;
-            }
-            let growth =
-                rotation_canvas_growth(source.width(), source.height(), candidate.rotation_degrees);
-            let undo = 1.0 / growth;
-            if (candidate.scale - undo).abs() < 0.05
-                || (candidate.scale - undo / 1.03).abs() < 0.05
-                || (candidate.scale - undo / 1.05).abs() < 0.05
-            {
-                candidate.score = candidate.score.max(GEOMETRY_MIN_DECODE_SCORE);
-                extend_unique_geometry_candidates(&mut kept, [candidate]);
-            }
-        }
-        kept.sort_by(compare_geometry_candidates);
-        Ok(kept)
-    } else if stage == "rotation-range-narrow" {
-        // 分箱与归一必须按布局分别留峰；截成全局前 12 会让同角的铺满/AABB 互相挤掉。
-        // Binning and refinement must keep peaks per layout; a global top-12 cut lets fill-crop and AABB at the same angle push each other out.
-        let mut kept = Vec::new();
-        for layout in [
-            GeometryLayout::FixedCanvasFit,
-            GeometryLayout::AabbPadded,
-            GeometryLayout::AabbHeightKept,
-            GeometryLayout::AabbWidthKept,
-            GeometryLayout::Standard,
-            GeometryLayout::ExpandedCanvas,
-            GeometryLayout::TightBounds,
-            GeometryLayout::CenterZoom,
-        ] {
-            let mut kept_for_layout = 0_usize;
-            for candidate in candidates
-                .iter()
-                .copied()
-                .filter(|candidate| candidate.layout == layout)
-            {
-                kept.push(candidate);
-                kept_for_layout += 1;
-                if kept_for_layout >= 8 {
-                    break;
-                }
-            }
-        }
-        for candidate in candidates.iter().copied().filter(|candidate| {
-            candidate.rotation_degrees.abs() <= 5.5
-                || (candidate.rotation_degrees.abs() - 7.0).abs() <= 1.6
-        }) {
-            extend_unique_geometry_candidates(&mut kept, [candidate]);
-        }
-        kept.sort_by(compare_geometry_candidates);
-        Ok(kept)
-    } else {
-        candidates.truncate(12);
-        Ok(candidates)
-    }
+    Ok(candidates)
 }
 
 fn geometry_worker_count(work_len: usize, parallel_allowed: bool) -> usize {
@@ -3565,14 +3075,8 @@ fn geometry_signature_score(
     pixel_phase_step: u32,
     sample_budget: usize,
 ) -> f32 {
-    geometry_signature_score_with_stop(
-        source,
-        transform,
-        pixel_phase_step,
-        sample_budget,
-        None,
-    )
-    .unwrap_or(0.0)
+    geometry_signature_score_with_stop(source, transform, pixel_phase_step, sample_budget, None)
+        .unwrap_or(0.0)
 }
 
 fn geometry_signature_score_with_stop(
@@ -3586,23 +3090,18 @@ fn geometry_signature_score_with_stop(
     let phase_step = pixel_phase_step.clamp(1, BLOCK_SIZE);
     let mut best_score = 0.0_f32;
 
-    for qim_profile in [
-        dwt_qim::QIM_PROFILE_PYRAMID,
-        dwt_qim::QIM_PROFILE_LEGACY,
-    ] {
+    for qim_profile in [dwt_qim::QIM_PROFILE_PYRAMID, dwt_qim::QIM_PROFILE_LEGACY] {
         if geometry_stop_requested(stop) {
             return None;
         }
-        let known = geometry_known_header_bits(qim_profile);
+        let known = recovery_header_bits(qim_profile);
         for pixel_phase_y in (0..BLOCK_SIZE).step_by(phase_step as usize) {
             for pixel_phase_x in (0..BLOCK_SIZE).step_by(phase_step as usize) {
                 if geometry_stop_requested(stop) {
                     return None;
                 }
-                let blocks_x =
-                    transform.output_width().saturating_sub(pixel_phase_x) / BLOCK_SIZE;
-                let blocks_y =
-                    transform.output_height().saturating_sub(pixel_phase_y) / BLOCK_SIZE;
+                let blocks_x = transform.output_width().saturating_sub(pixel_phase_x) / BLOCK_SIZE;
+                let blocks_y = transform.output_height().saturating_sub(pixel_phase_y) / BLOCK_SIZE;
                 let block_count = blocks_x as usize * blocks_y as usize;
                 if block_count < ROBUST_HEADER_BITS || blocks_x == 0 {
                     continue;
@@ -3649,9 +3148,8 @@ fn geometry_signature_score_with_stop(
                     let mut correlation = 0.0_f32;
                     let mut squared_weight = 0.0_f32;
                     let mut matched_bits = 0_usize;
-                    for &(known_index, expected) in known {
-                        let local_phase =
-                            (known_index * 3 + modulus - phase_delta) % modulus;
+                    for &(known_index, expected) in &known {
+                        let local_phase = (known_index * 3 + modulus - phase_delta) % modulus;
                         let weight = weights[local_phase];
                         if weight <= f32::EPSILON {
                             continue;
@@ -3681,6 +3179,9 @@ fn geometry_signature_score_with_stop(
 }
 
 fn geometry_stop_requested(stop: Option<&AtomicBool>) -> bool {
+    if recovery::stopped() {
+        return true;
+    }
     stop.map(|flag| flag.load(AtomicOrdering::Relaxed))
         .unwrap_or(false)
 }
@@ -3699,12 +3200,7 @@ fn header_guided_scale_candidates(source: &RgbaImage) -> Vec<GeometryCandidate> 
             || !(0.25..=4.0).contains(&scale)
             || (scale - 1.0).abs() < 0.002
             || (scale > 1.002 && scale < 1.40)
-            || contains_geometry_parameter(
-                &candidates,
-                0.0,
-                scale,
-                GeometryLayout::Standard,
-            )
+            || contains_geometry_parameter(&candidates, 0.0, scale, GeometryLayout::Standard)
         {
             continue;
         }
@@ -3712,7 +3208,7 @@ fn header_guided_scale_candidates(source: &RgbaImage) -> Vec<GeometryCandidate> 
             rotation_degrees: 0.0,
             scale,
             layout: GeometryLayout::Standard,
-            score: 1.0,
+            score: candidate.score,
         });
     }
     candidates
@@ -3768,15 +3264,6 @@ fn padding_hint_layout_parameters(
     parameters
 }
 
-fn priority_angle_parameters() -> Vec<f32> {
-    // 快速层只保留日常最常见的小角度，是因为十度以上候选已由分段整数粗搜索覆盖；在每种画布模型上重复提前计算大角度只会拖慢失败图片和七度左右的任意角度恢复。
-    // The fast layer keeps only common small rotations because ten-degree-and-larger candidates are already covered by the tiered integer coarse search; evaluating them early for every canvas model only slows failed images and arbitrary rotations around seven degrees.
-    vec![
-        -0.1, 0.1, -0.5, 0.5, -1.0, 1.0, -2.5, 2.5, -2.0, 2.0, -3.0, 3.0,
-        -5.0, 5.0,
-    ]
-}
-
 #[allow(dead_code)]
 fn broad_angle_parameters() -> Vec<f32> {
     let mut angles = Vec::new();
@@ -3785,15 +3272,6 @@ fn broad_angle_parameters() -> Vec<f32> {
         if step != 0 {
             angles.push(step as f32);
         }
-    }
-    angles
-}
-
-fn near_broad_angle_parameters() -> Vec<f32> {
-    let mut angles = Vec::new();
-    for magnitude in 1..=8 {
-        angles.push(-(magnitude as f32));
-        angles.push(magnitude as f32);
     }
     angles
 }
@@ -3896,74 +3374,6 @@ fn tight_bounds_correction_scales() -> [f32; 8] {
     [0.90, 0.94, 0.97, 1.0, 1.03, 1.06, 1.09, 1.12]
 }
 
-fn fill_crop_cover_undo_candidates(source: &RgbaImage) -> Vec<GeometryCandidate> {
-    // ±1°/±2° 与 ±7° 一起先物化，桌面编辑器的小角铺满裁切不能等裁边探针。
-    // Materialize ±1°/±2° with ±7° first; desktop fill-crop at small angles cannot wait for trim probes.
-    fill_crop_cover_undo_for_angles(source, &[-7.0, 7.0, -2.3, 2.3, -2.0, 2.0, -1.0, 1.0])
-}
-
-fn fill_crop_small_angle_undo_candidates(source: &RgbaImage) -> Vec<GeometryCandidate> {
-    fill_crop_cover_undo_for_angles(source, &[-2.0, 2.0, -1.0, 1.0])
-}
-
-fn fill_crop_cover_undo_for_angles(source: &RgbaImage, angles: &[f32]) -> Vec<GeometryCandidate> {
-    let mut forced = Vec::new();
-    for extra in [1.03_f32, 1.0, 0.955] {
-        for &angle in angles {
-            let growth = rotation_canvas_growth(source.width(), source.height(), angle);
-            let scale = 1.0 / (growth * extra);
-            if (0.25..=4.0).contains(&scale) {
-                forced.push(GeometryCandidate {
-                    rotation_degrees: angle,
-                    scale,
-                    layout: GeometryLayout::FixedCanvasFit,
-                    score: 1.0,
-                });
-            }
-        }
-    }
-    forced
-}
-
-#[cfg(test)]
-fn no_pad_fill_crop_forced_candidates(source: &RgbaImage) -> Vec<GeometryCandidate> {
-    let mut forced = Vec::new();
-    for angle in [-7.0_f32, 7.0, -6.0, 6.0, -8.0, 8.0, -5.0, 5.0] {
-        let growth = rotation_canvas_growth(source.width(), source.height(), angle);
-        for extra in [1.0_f32, 1.03, 1.05] {
-            let scale = 1.0 / (growth * extra);
-            if (0.25..=4.0).contains(&scale) {
-                forced.push(GeometryCandidate {
-                    rotation_degrees: angle,
-                    scale,
-                    layout: GeometryLayout::FixedCanvasFit,
-                    score: 1.0,
-                });
-            }
-        }
-    }
-    forced
-}
-
-#[cfg(test)]
-fn no_pad_fill_crop_seven_degree_candidates(source: &RgbaImage) -> Vec<GeometryCandidate> {
-    no_pad_fill_crop_forced_candidates(source)
-        .into_iter()
-        .filter(|candidate| (candidate.rotation_degrees.abs() - 7.0).abs() < 0.01)
-        .collect()
-}
-
-#[allow(dead_code)]
-fn no_pad_fill_crop_angle_parameters() -> Vec<f32> {
-    let mut angles = priority_angle_parameters();
-    angles.extend(near_broad_angle_parameters());
-    angles.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
-    angles.dedup_by(|left, right| (*left - *right).abs() < 0.01);
-    // 快速层原先没有 4°/6°/7°/8°；无白边铺满裁切正好落在这一段，必须与常见小角度一起评分，而不能等远层在噪声门槛上被裁掉。
-    // The fast layer previously omitted 4°/6°/7°/8°; no-pad fill-crop lands in that band, so those angles must be scored with common small rotations instead of waiting for a far layer that is gated on noise.
-    angles
-}
-
 fn fixed_canvas_correction_scales(width: u32, height: u32, angle: f32) -> Vec<f32> {
     let growth = rotation_canvas_growth(width, height, angle);
     let inverse_growth = 1.0 / growth;
@@ -3988,17 +3398,6 @@ fn fixed_canvas_correction_scales(width: u32, height: u32, angle: f32) -> Vec<f3
     scales
 }
 
-fn orientation_angle_parameters() -> Vec<f32> {
-    vec![90.0, -90.0, 180.0]
-}
-
-fn priority_scale_parameters() -> Vec<f32> {
-    vec![
-        0.5, 0.25, 2.0, 1.5, 1.25, 3.0, 4.0, 0.333_333_34, 0.4, 0.666_666_7,
-        0.75, 0.8, 0.625, 0.833_333_3, 1.333_333_4, 1.6, 1.2,
-    ]
-}
-
 fn coarse_scale_parameters() -> Vec<f32> {
     let mut scales = Vec::new();
     let mut scale = 0.25_f32;
@@ -4008,10 +3407,6 @@ fn coarse_scale_parameters() -> Vec<f32> {
         }
         scale *= 1.04;
     }
-    scales.extend([
-        0.25, 0.333_333_34, 0.4, 0.5, 0.625, 0.75, 0.8, 1.25, 1.333_333_4, 1.5,
-        1.75, 2.0, 2.5, 3.0, 4.0,
-    ]);
     scales.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
     scales.dedup_by(|left, right| (*left - *right).abs() < 0.0005);
     scales
@@ -4123,61 +3518,6 @@ where
     aligned
 }
 
-fn restore_ratio_cost(scale: f32) -> f32 {
-    [0.5_f32, 0.25, 2.0, 1.5, 1.25, 3.0, 4.0]
-        .into_iter()
-        .map(|target| (scale - target).abs())
-        .fold(f32::MAX, f32::min)
-}
-
-fn header_period_cost(source: &RgbaImage, candidate: &GeometryCandidate) -> u8 {
-    let Some(transform) = affine_for_geometry(
-        source,
-        candidate.rotation_degrees,
-        candidate.scale,
-        candidate.layout,
-    ) else {
-        return 2;
-    };
-    let width_align = transform.output_width() % 16 == 0;
-    let height_align = transform.output_height() % 16 == 0;
-    if width_align && height_align {
-        0
-    } else if transform.output_width() % 8 == 0 && transform.output_height() % 8 == 0 {
-        1
-    } else {
-        2
-    }
-}
-
-fn expand_pixel_aligned_scale_candidates(
-    source: &RgbaImage,
-    candidates: &[GeometryCandidate],
-) -> Vec<GeometryCandidate> {
-    let mut expanded = Vec::new();
-    for candidate in candidates {
-        if candidate.layout != GeometryLayout::Standard
-            || candidate.rotation_degrees.abs() >= 0.001
-        {
-            expanded.push(*candidate);
-            continue;
-        }
-        for scale in period_aligned_scales(source.width(), source.height(), candidate.scale) {
-            let mut aligned = *candidate;
-            aligned.scale = scale;
-            if !contains_geometry_parameter(
-                &expanded,
-                aligned.rotation_degrees,
-                aligned.scale,
-                aligned.layout,
-            ) {
-                expanded.push(aligned);
-            }
-        }
-    }
-    expanded
-}
-
 fn extend_unique_geometry_candidates<I>(target: &mut Vec<GeometryCandidate>, candidates: I)
 where
     I: IntoIterator<Item = GeometryCandidate>,
@@ -4203,15 +3543,14 @@ fn center_window_origin_candidates(
     original_width: u32,
     original_height: u32,
 ) -> Vec<OriginCandidate> {
-    if current_width >= original_width && current_height >= original_height {
-        return Vec::new();
-    }
-    let start_x = original_width.saturating_sub(current_width) / 2;
-    let start_y = original_height.saturating_sub(current_height) / 2;
-    let floor_x = (start_x / BLOCK_SIZE) as i32;
-    let floor_y = (start_y / BLOCK_SIZE) as i32;
-    let ceil_x = ((start_x + BLOCK_SIZE - 1) / BLOCK_SIZE) as i32;
-    let ceil_y = ((start_y + BLOCK_SIZE - 1) / BLOCK_SIZE) as i32;
+    // 扩大画布留下的填充对应负原点，不能只为裁小图片生成中心候选，否则大角旋转会错过真实网格。
+    // Padding in an expanded canvas corresponds to negative origins; center candidates must cover enlarged canvases as well as crops or large rotations miss the true grid.
+    let start_x = (original_width as f32 - current_width as f32) / 16.0;
+    let start_y = (original_height as f32 - current_height as f32) / 16.0;
+    let floor_x = start_x.floor() as i32;
+    let ceil_x = start_x.ceil() as i32;
+    let floor_y = start_y.floor() as i32;
+    let ceil_y = start_y.ceil() as i32;
     let mut origins = Vec::new();
     for block_y in [ceil_y, floor_y] {
         for block_x in [ceil_x, floor_x] {
@@ -4243,8 +3582,10 @@ fn origin_candidates(
 ) -> Vec<OriginCandidate> {
     let original_blocks_x = header.original_width as i32 / BLOCK_SIZE as i32;
     let original_blocks_y = header.original_height as i32 / BLOCK_SIZE as i32;
-    let current_blocks_x = current_width.saturating_sub(candidate.pixel_phase_x) as i32 / BLOCK_SIZE as i32;
-    let current_blocks_y = current_height.saturating_sub(candidate.pixel_phase_y) as i32 / BLOCK_SIZE as i32;
+    let current_blocks_x =
+        current_width.saturating_sub(candidate.pixel_phase_x) as i32 / BLOCK_SIZE as i32;
+    let current_blocks_y =
+        current_height.saturating_sub(candidate.pixel_phase_y) as i32 / BLOCK_SIZE as i32;
     let max_x = (original_blocks_x - current_blocks_x).max(0) + ORIGIN_MARGIN_BLOCKS;
     let max_y = (original_blocks_y - current_blocks_y).max(0) + ORIGIN_MARGIN_BLOCKS;
     let modulus = (ROBUST_HEADER_BITS * 3) as i32;
@@ -4254,6 +3595,9 @@ fn origin_candidates(
         header.original_width as u32,
         header.original_height as u32,
     );
+    // 公开头的路由相位是原点的精确同余约束，中心裁切猜测也必须满足它，避免先为几十个不可能原点纠错正文。
+    // The header route phase is an exact congruence constraint on the origin; center-crop guesses must satisfy it before expensive body correction.
+    origins.retain(|origin| robust_phase(origin.block_x, origin.block_y) == candidate.phase_delta);
     let mut matched = Vec::new();
     for block_y in -ORIGIN_MARGIN_BLOCKS..=max_y {
         for block_x in -ORIGIN_MARGIN_BLOCKS..=max_x {
@@ -4261,7 +3605,9 @@ fn origin_candidates(
                 + HEADER_PHASE_MULTIPLIER_Y as i32 * block_y)
                 .rem_euclid(modulus) as usize;
             if delta == candidate.phase_delta
-                && !origins.iter().any(|origin| origin.block_x == block_x && origin.block_y == block_y)
+                && !origins
+                    .iter()
+                    .any(|origin| origin.block_x == block_x && origin.block_y == block_y)
             {
                 matched.push(OriginCandidate { block_x, block_y });
             }
@@ -4269,7 +3615,10 @@ fn origin_candidates(
     }
     matched.sort_by_key(|origin| {
         let outside = usize::from(origin.block_x < 0 || origin.block_y < 0);
-        (outside, origin.block_x.unsigned_abs() + origin.block_y.unsigned_abs())
+        (
+            outside,
+            origin.block_x.unsigned_abs() + origin.block_y.unsigned_abs(),
+        )
     });
     origins.extend(matched);
     origins.truncate(MAX_ORIGIN_CANDIDATES);
@@ -4282,9 +3631,11 @@ fn finalize_report(
     actual_height: u32,
 ) -> Result<ExtractReport> {
     let current_fingerprint = difference_hash(&decoded.normalized);
-    let fingerprint_distance = hamming_distance(decoded.payload.fingerprint()?, current_fingerprint);
+    let fingerprint_distance =
+        hamming_distance(decoded.payload.fingerprint()?, current_fingerprint);
     let current_partitions = partition_fingerprints(&decoded.normalized);
-    let tamper_regions = compare_partitions(&decoded.payload.partition_fingerprints, &current_partitions);
+    let tamper_regions =
+        compare_partitions(&decoded.payload.partition_fingerprints, &current_partitions);
     let geometry_changed = actual_width != decoded.payload.width
         || actual_height != decoded.payload.height
         || !decoded.registration.is_identity();
@@ -4334,7 +3685,11 @@ fn normalize_to_original_canvas(
                 && target_x < original_width as i32
                 && target_y < original_height as i32
             {
-                canvas.put_pixel(target_x as u32, target_y as u32, *source.get_pixel(source_x, source_y));
+                canvas.put_pixel(
+                    target_x as u32,
+                    target_y as u32,
+                    *source.get_pixel(source_x, source_y),
+                );
             }
         }
     }
@@ -4357,14 +3712,25 @@ fn extract_legacy(
         return Err(CoreError::PayloadCorrupted);
     }
     let body_bits = collect_legacy_body_bits(&rgba, bit_len, header.route_step, &header.salt)?;
-    let decoded = bch::decode_bits(&body_bits, header.body_len as usize).ok_or(CoreError::PayloadCorrupted)?;
+    let decoded = bch::decode_bits(&body_bits, header.body_len as usize)
+        .ok_or(CoreError::PayloadCorrupted)?;
     let key = resolve_key(key_source, &header.salt)?;
     let payload = open_encrypted_body(&decoded.bytes, &key)?;
     let current_fingerprint = difference_hash(image);
     let fingerprint_distance = hamming_distance(payload.fingerprint()?, current_fingerprint);
-    let tamper_regions = compare_partitions(&payload.partition_fingerprints, &partition_fingerprints(image));
-    let geometry_changed = payload.width != image.width() || payload.height != image.height() || !registration.is_identity();
-    let integrity = classify_integrity(fingerprint_distance, geometry_changed, &tamper_regions, payload.temporal.is_some());
+    let tamper_regions = compare_partitions(
+        &payload.partition_fingerprints,
+        &partition_fingerprints(image),
+    );
+    let geometry_changed = payload.width != image.width()
+        || payload.height != image.height()
+        || !registration.is_identity();
+    let integrity = classify_integrity(
+        fingerprint_distance,
+        geometry_changed,
+        &tamper_regions,
+        payload.temporal.is_some(),
+    );
     Ok(ExtractReport {
         text: payload.text,
         integrity,
@@ -4386,6 +3752,9 @@ fn collect_legacy_header(image: &RgbaImage) -> Result<LegacyHeader> {
     let mut ones = vec![0_usize; LEGACY_HEADER_BITS];
     let mut totals = vec![0_usize; LEGACY_HEADER_BITS];
     for by in 0..blocks_y {
+        // 旧格式读取同样需要响应停止信号，兼容分支不能绕过整次恢复预算。
+        // Historical readers must also respond to stopping; compatibility cannot bypass the recovery budget.
+        recovery::checkpoint()?;
         for bx in 0..blocks_x {
             if legacy_is_header_block(bx, by) && !legacy_is_sync_block(bx, by, blocks_x, blocks_y) {
                 let index = legacy_header_index(bx, by);
@@ -4397,7 +3766,11 @@ fn collect_legacy_header(image: &RgbaImage) -> Result<LegacyHeader> {
     if totals.contains(&0) {
         return Err(CoreError::HeaderNotFound);
     }
-    let bits: Vec<bool> = ones.into_iter().zip(totals).map(|(one, total)| one * 2 >= total).collect();
+    let bits: Vec<bool> = ones
+        .into_iter()
+        .zip(totals)
+        .map(|(one, total)| one * 2 >= total)
+        .collect();
     LegacyHeader::from_bytes(&bits_to_bytes(&bits))
 }
 
@@ -4414,8 +3787,10 @@ fn collect_legacy_body_bits(
     let mut totals = vec![0_usize; bit_len];
     let mut sequence = 0_usize;
     for by in 0..blocks_y {
+        recovery::checkpoint()?;
         for bx in 0..blocks_x {
-            if !legacy_is_header_block(bx, by) && !legacy_is_sync_block(bx, by, blocks_x, blocks_y) {
+            if !legacy_is_header_block(bx, by) && !legacy_is_sync_block(bx, by, blocks_x, blocks_y)
+            {
                 let index = (sequence * route_step as usize + offset) % bit_len;
                 sequence += 1;
                 totals[index] += 1;
@@ -4426,7 +3801,11 @@ fn collect_legacy_body_bits(
     if totals.contains(&0) {
         return Err(CoreError::PayloadCorrupted);
     }
-    Ok(ones.into_iter().zip(totals).map(|(one, total)| one * 2 >= total).collect())
+    Ok(ones
+        .into_iter()
+        .zip(totals)
+        .map(|(one, total)| one * 2 >= total)
+        .collect())
 }
 
 fn count_legacy_body_blocks(width: u32, height: u32) -> usize {
@@ -4435,7 +3814,10 @@ fn count_legacy_body_blocks(width: u32, height: u32) -> usize {
     let mut count = 0_usize;
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
-            count += usize::from(!legacy_is_header_block(bx, by) && !legacy_is_sync_block(bx, by, blocks_x, blocks_y));
+            count += usize::from(
+                !legacy_is_header_block(bx, by)
+                    && !legacy_is_sync_block(bx, by, blocks_x, blocks_y),
+            );
         }
     }
     count
@@ -4457,19 +3839,24 @@ fn legacy_is_sync_block(bx: u32, by: u32, blocks_x: u32, blocks_y: u32) -> bool 
     let center_x = blocks_x / 2;
     let center_y = blocks_y / 2;
     let anchors = [
-        (left, top), (right, top), (left, bottom), (right, bottom),
-        (center_x, center_y), (center_x, top), (center_x, bottom),
-        (left, center_y), (right, center_y),
+        (left, top),
+        (right, top),
+        (left, bottom),
+        (right, bottom),
+        (center_x, center_y),
+        (center_x, top),
+        (center_x, bottom),
+        (left, center_y),
+        (right, center_y),
     ];
-    anchors.iter().any(|(cx, cy)| {
-        (bx as i32 - *cx as i32).abs() <= 1 && (by as i32 - *cy as i32).abs() <= 1
-    })
+    anchors
+        .iter()
+        .any(|(cx, cy)| (bx as i32 - *cx as i32).abs() <= 1 && (by as i32 - *cy as i32).abs() <= 1)
 }
 
 fn robust_phase(block_x: i32, block_y: i32) -> usize {
     let modulus = (ROBUST_HEADER_BITS * 3) as i32;
-    (HEADER_PHASE_MULTIPLIER_X as i32 * block_x
-        + HEADER_PHASE_MULTIPLIER_Y as i32 * block_y)
+    (HEADER_PHASE_MULTIPLIER_X as i32 * block_x + HEADER_PHASE_MULTIPLIER_Y as i32 * block_y)
         .rem_euclid(modulus) as usize
 }
 
@@ -4536,6 +3923,17 @@ fn robust_body_index(
     ((rank.wrapping_mul(step) + offset) % body_blocks) % bit_len
 }
 
+fn interleave_body_index(index: usize, bit_len: usize, profile: u8) -> usize {
+    // 按码字列交织，使一段局部丢失分散到多个 BCH 码字，避免某个码字独自承担整片裁剪缺口。
+    // Interleave codeword columns so a local loss spreads across BCH words instead of erasing most of one codeword.
+    if profile >= dwt_qim::QIM_PROFILE_INTERLEAVED {
+        let words = bit_len / 31;
+        (index % words) * 31 + index / words
+    } else {
+        index
+    }
+}
+
 fn select_body_route_step(body_blocks: usize, salt: &[u8; 16]) -> usize {
     if body_blocks <= 2 {
         return 1;
@@ -4570,19 +3968,17 @@ fn read_qim_at_pixel(
     pixel_x: u32,
     pixel_y: u32,
     step: f32,
-    qim_profile: u8,
+    profile: u8,
 ) -> dwt_qim::BitObservation {
-    let block_x = pixel_x / BLOCK_SIZE;
-    let block_y = pixel_y / BLOCK_SIZE;
-    if pixel_x % BLOCK_SIZE == 0 && pixel_y % BLOCK_SIZE == 0 {
-        return dwt_qim::read_bit_with_profile(image, block_x, block_y, step, qim_profile);
-    }
-    let view = image.view(pixel_x, pixel_y, BLOCK_SIZE, BLOCK_SIZE).to_image();
-    dwt_qim::read_bit_with_profile(&view, 0, 0, step, qim_profile)
+    dwt_qim::read_bit_at_pixel(image, pixel_x, pixel_y, step, profile)
 }
 
 fn resolve_key(source: &KeySource, embedded_salt: &[u8; 16]) -> Result<WatermarkKey> {
-    match source {
+    recovery::checkpoint()?;
+    if let Some(key) = recovery::cached_key(embedded_salt) {
+        return Ok(key);
+    }
+    let result = match source {
         KeySource::KeyFile(file) => {
             let key = file.to_watermark_key()?;
             if &key.salt != embedded_salt {
@@ -4593,21 +3989,31 @@ fn resolve_key(source: &KeySource, embedded_salt: &[u8; 16]) -> Result<Watermark
         KeySource::KeyFiles(files) => {
             // 批量独立密钥必须按水印公开头中的 salt 选择对应密钥，否则把文件顺序与密钥顺序强行绑定会在用户重新排序后产生错误解码。
             // Batch independent keys are selected by the salt stored in each public watermark header; binding files to key-file order would break as soon as the user reorders either list.
+            let mut matched = None;
             for file in files {
                 let key = file.to_watermark_key()?;
                 if &key.salt == embedded_salt {
-                    return Ok(key);
+                    matched = Some(key);
+                    break;
                 }
             }
-            Err(CoreError::SaltMismatch)
+            matched.ok_or(CoreError::SaltMismatch)
         }
         KeySource::CustomPassword(password) => Ok(WatermarkKey {
             mode: crate::keyfile::KeyMode::Custom,
             salt: *embedded_salt,
-            derived_key: derive_key(password.as_bytes(), embedded_salt, DEFAULT_PBKDF2_ITERATIONS),
+            derived_key: derive_key(
+                password.as_bytes(),
+                embedded_salt,
+                DEFAULT_PBKDF2_ITERATIONS,
+            ),
             iterations: DEFAULT_PBKDF2_ITERATIONS,
         }),
+    };
+    if let Ok(key) = &result {
+        recovery::cache_key(*embedded_salt, key);
     }
+    result
 }
 
 fn classify_integrity(
@@ -4618,8 +4024,12 @@ fn classify_integrity(
 ) -> IntegrityStatus {
     let modified_threshold = if video_frame { 24 } else { 14 };
     let uncertain_threshold = if video_frame { 16 } else { 8 };
-    let has_modified_region = tamper_regions.iter().any(|region| region.status == "modified");
-    let has_uncertain_region = tamper_regions.iter().any(|region| region.status == "uncertain");
+    let has_modified_region = tamper_regions
+        .iter()
+        .any(|region| region.status == "modified");
+    let has_uncertain_region = tamper_regions
+        .iter()
+        .any(|region| region.status == "uncertain");
     if geometry_changed || distance >= modified_threshold || has_modified_region {
         IntegrityStatus::Modified
     } else if distance >= uncertain_threshold || has_uncertain_region {
@@ -4634,7 +4044,9 @@ fn validate_embed_options(options: &EmbedOptions) -> Result<()> {
         return Err(CoreError::InvalidArgument("水印文本不能为空".into()));
     }
     if !(3.0..=20.0).contains(&options.strength) {
-        return Err(CoreError::InvalidArgument("嵌入强度必须位于 3 到 20 之间".into()));
+        return Err(CoreError::InvalidArgument(
+            "嵌入强度必须位于 3 到 20 之间".into(),
+        ));
     }
     if let Some(temporal) = &options.temporal {
         if temporal.frame_count == 0 || temporal.frame_index >= temporal.frame_count {
@@ -4648,8 +4060,12 @@ fn block_is_solid_geometry_fill(image: &RgbaImage, pixel_x: u32, pixel_y: u32) -
     let mut min_luma = 255_u8;
     let mut max_luma = 0_u8;
     for (dx, dy) in [(0_u32, 0_u32), (7, 0), (0, 7), (7, 7), (3, 3)] {
-        let x = pixel_x.saturating_add(dx).min(image.width().saturating_sub(1));
-        let y = pixel_y.saturating_add(dy).min(image.height().saturating_sub(1));
+        let x = pixel_x
+            .saturating_add(dx)
+            .min(image.width().saturating_sub(1));
+        let y = pixel_y
+            .saturating_add(dy)
+            .min(image.height().saturating_sub(1));
         let pixel = image.get_pixel(x, y);
         let luma = ((pixel[0] as u16 + pixel[1] as u16 + pixel[2] as u16) / 3) as u8;
         min_luma = min_luma.min(luma);
@@ -4695,9 +4111,9 @@ fn auto_strength_floor(media_kind: &str) -> f32 {
 }
 
 fn psnr_meets_minimum(psnr: f64) -> bool {
-    // 展示仍用两位小数；比较放宽 0.05 dB，避免 39.97 这种贴线值把整段视频判死。
-    // Display still uses two decimals; the compare allows 0.05 dB so a 39.97 near-miss does not fail a whole clip.
-    psnr + PSNR_ACCEPT_EPSILON_DB >= MIN_PSNR_DB
+    // 视觉质量门槛比较实际值，不能用显示取整或容差把低于要求的媒体标为合格。
+    // The quality gate compares actual values so rounding and tolerance cannot pass media below the requirement.
+    psnr > MIN_PSNR_DB
 }
 
 fn bytes_to_lower_hex(bytes: &[u8]) -> String {
@@ -4747,11 +4163,225 @@ mod tests {
     use super::*;
 
     #[test]
-    fn psnr_near_miss_within_epsilon_is_accepted() {
-        assert!(psnr_meets_minimum(39.97));
-        assert!(psnr_meets_minimum(39.95));
+    fn body_observation_stops_after_cancellation_arrives() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let image = image::load_from_memory(include_bytes!("../tests/fixtures/640x480.png"))
+            .unwrap()
+            .to_rgba8();
+        let candidate = collect_robust_header_candidates(&image, 1, false, false)
+            .0
+            .remove(0);
+        let header = &candidate.header;
+        let blocks = count_robust_body_blocks(
+            header.original_width as u32 / 8,
+            header.original_height as u32 / 8,
+        );
+        let checks = AtomicUsize::new(0);
+        let _scope = RequestScope::enter(RecoveryOptions {
+            cancellation: Some(Arc::new(move || {
+                checks.fetch_add(1, Ordering::Relaxed) >= 4
+            })),
+            ..Default::default()
+        });
+        let key = WatermarkKey {
+            mode: crate::KeyMode::Independent,
+            salt: [19; 16],
+            derived_key: [71; 32],
+            iterations: 210_000,
+        };
+        // 直接进入已验证头后的正文阶段，确保系数扫描本身能够中断，而不是依赖外层几何回调。
+        // Enter the payload stage after a validated header to ensure coefficient scanning can stop without relying on an outer geometry callback.
+        let result = collect_and_open_robust_body(
+            &image,
+            &candidate,
+            OriginCandidate {
+                block_x: 0,
+                block_y: 0,
+            },
+            bch::encoded_bit_len(header.body_len as usize),
+            select_body_route_step(blocks, &header.salt),
+            blocks,
+            &KeySource::KeyFile(key.to_key_file()),
+        );
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+    }
+
+    #[test]
+    fn password_recovery_works_without_a_known_salt_prior() {
+        let original = DynamicImage::ImageRgba8(RgbaImage::from_fn(640, 480, |x, y| {
+            Rgba([90 + (x % 80) as u8, 100 + (y % 60) as u8, 120, 255])
+        }));
+        let password = "fixed test password";
+        let key = WatermarkKey::from_password(password, Some([31; 16])).unwrap();
+        let options = EmbedOptions {
+            text: "password recovery".into(),
+            key: key.clone(),
+            strength: 6.0,
+            media_kind: "image".into(),
+            temporal: None,
+        };
+        let prepared = prepare_payload(&original, &options).unwrap();
+        let header = RobustHeader {
+            salt: key.salt,
+            body_len: prepared.body.len() as u32,
+            original_width: 640,
+            original_height: 480,
+            strength_x10: 60,
+            flags: 0,
+            qim_profile: dwt_qim::QIM_PROFILE_INTERLEAVED,
+        };
+        let mut encoded = original.to_rgba8();
+        embed_robust_bits(
+            &mut encoded,
+            &bytes_to_bits(&header.to_bytes()),
+            &prepared.body_bits,
+            prepared.route_step,
+            &key.salt,
+            6.0,
+            header.qim_profile,
+        );
+        let cropped = imageops::crop_imm(&encoded, 7, 11, 601, 445).to_image();
+        let source = KeySource::CustomPassword(password.into());
+        let _scope = RequestScope::enter(RecoveryOptions::default());
+        recovery::set_key_source(&source).unwrap();
+        // 密码路径不知道盐值，必须仅凭公开同步位恢复裁剪相位，不能依赖密钥文件的额外先验。
+        // Password mode does not know the salt and must recover crop phase from public synchronization bits without a key-file prior.
+        assert!(recovery::expected_salt().is_none());
+        let report = extract_registered_image(
+            &DynamicImage::ImageRgba8(cropped),
+            601,
+            445,
+            &source,
+            SyncRegistration::identity(1.0),
+        )
+        .unwrap();
+        assert_eq!(report.text, options.text);
+    }
+
+    #[test]
+    fn historical_carriers_keep_their_original_body_routes() {
+        let original = DynamicImage::ImageRgba8(RgbaImage::from_fn(640, 480, |x, y| {
+            Rgba([90 + (x % 80) as u8, 100 + (y % 60) as u8, 120, 255])
+        }));
+        let key = WatermarkKey {
+            mode: crate::KeyMode::Independent,
+            salt: [23; 16],
+            derived_key: [67; 32],
+            iterations: 210_000,
+        };
+        let options = EmbedOptions {
+            text: "historical carrier".into(),
+            key: key.clone(),
+            strength: 8.0,
+            media_kind: "image".into(),
+            temporal: None,
+        };
+        let prepared = prepare_payload(&original, &options).unwrap();
+        // 明确生成旧布局夹具，防止新编码默认布局的测试掩盖向后兼容读取回归。
+        // Explicit historical layouts prevent tests of the new encoding default from masking backward-reader regressions.
+        for profile in [dwt_qim::QIM_PROFILE_LEGACY, dwt_qim::QIM_PROFILE_PYRAMID] {
+            let header = RobustHeader {
+                salt: key.salt,
+                body_len: prepared.body.len() as u32,
+                original_width: 640,
+                original_height: 480,
+                strength_x10: 80,
+                flags: 0,
+                qim_profile: profile,
+            };
+            let mut encoded = original.to_rgba8();
+            embed_robust_bits(
+                &mut encoded,
+                &bytes_to_bits(&header.to_bytes()),
+                &prepared.body_bits,
+                prepared.route_step,
+                &key.salt,
+                8.0,
+                profile,
+            );
+            let report = extract_registered_image(
+                &DynamicImage::ImageRgba8(encoded),
+                640,
+                480,
+                &KeySource::KeyFile(key.to_key_file()),
+                SyncRegistration::identity(1.0),
+            )
+            .unwrap();
+            assert_eq!(report.text, options.text);
+        }
+    }
+
+    #[test]
+    fn historical_dct_media_remains_readable() {
+        let original =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(640, 480, Rgba([120, 130, 140, 255])));
+        let key = WatermarkKey {
+            mode: crate::KeyMode::Independent,
+            salt: [29; 16],
+            derived_key: [73; 32],
+            iterations: 210_000,
+        };
+        let payload = InnerPayload::new(
+            "historical DCT".into(),
+            difference_hash(&original),
+            640,
+            480,
+            "image",
+            Vec::new(),
+            None,
+        );
+        let body = create_encrypted_body(&payload, &key).unwrap();
+        let bits = bch::encode_bytes(&body);
+        let mut route = 3;
+        while gcd(route, bits.len()) != 1 {
+            route += 2;
+        }
+        let header = LegacyHeader {
+            salt: key.salt,
+            body_len: body.len() as u32,
+            route_step: route as u16,
+            strength_x10: 80,
+        };
+        let header_bits = bytes_to_bits(&header.to_bytes());
+        let mut encoded = original.to_rgba8();
+        let mut sequence = 0;
+        for y in 0..60 {
+            for x in 0..80 {
+                if legacy_is_sync_block(x, y, 80, 60) {
+                    continue;
+                }
+                let bit = if legacy_is_header_block(x, y) {
+                    header_bits[legacy_header_index(x, y)]
+                } else {
+                    let index =
+                        (sequence * route + salt_offset(&key.salt, bits.len())) % bits.len();
+                    sequence += 1;
+                    bits[index]
+                };
+                dct::write_bit(&mut encoded, x, y, bit, 16.0);
+            }
+        }
+        let report = extract_registered_image(
+            &DynamicImage::ImageRgba8(encoded),
+            640,
+            480,
+            &KeySource::KeyFile(key.to_key_file()),
+            SyncRegistration::identity(1.0),
+        )
+        .unwrap();
+        assert_eq!(report.text, payload.text);
+    }
+
+    #[test]
+    fn psnr_gate_requires_strictly_more_than_minimum() {
+        assert!(!psnr_meets_minimum(39.97));
+        assert!(!psnr_meets_minimum(39.95));
         assert!(!psnr_meets_minimum(39.90));
-        assert!(psnr_meets_minimum(40.0));
+        assert!(!psnr_meets_minimum(40.0));
+        assert!(psnr_meets_minimum(40.01));
     }
 
     #[test]
@@ -4793,9 +4423,9 @@ mod tests {
             score: 1.0,
         };
         let recovered = origin_candidates(&candidate.header, &candidate, 640, 480);
-        assert!(recovered.iter().any(|value| {
-            value.block_x == origin.block_x && value.block_y == origin.block_y
-        }));
+        assert!(recovered
+            .iter()
+            .any(|value| { value.block_x == origin.block_x && value.block_y == origin.block_y }));
     }
 
     #[test]
@@ -4839,7 +4469,9 @@ mod tests {
         let around_137 = expanded_range_angles(140.0, 15.0, 1.0);
         assert!(around_137.iter().any(|angle| (*angle - 137.0).abs() < 0.01));
         let hundredths = expanded_range_angles(17.30, 0.15, 0.01);
-        assert!(hundredths.iter().any(|angle| (*angle - 17.30).abs() <= 0.02));
+        assert!(hundredths
+            .iter()
+            .any(|angle| (*angle - 17.30).abs() <= 0.02));
     }
 
     #[test]
@@ -4859,7 +4491,12 @@ mod tests {
         })
         .save(&input)
         .unwrap();
-        let key = crate::keyfile::WatermarkKey::random(crate::keyfile::KeyMode::Independent);
+        let key = crate::keyfile::WatermarkKey {
+            mode: crate::keyfile::KeyMode::Independent,
+            salt: [19; 16],
+            derived_key: [71; 32],
+            iterations: 210_000,
+        };
         embed_image_file_with_auto_strength(
             &input,
             &watermarked,
@@ -4927,13 +4564,16 @@ mod tests {
             &KeySource::KeyFile(key.to_key_file()),
             SyncRegistration::identity(1.0),
         );
-        assert_eq!(report.expect("known inverse extract").text, "aabb-known-inverse");
+        assert_eq!(
+            report.expect("known inverse extract").text,
+            "aabb-known-inverse"
+        );
     }
 
     #[test]
     fn center_zoom_photo_known_inverse_extracts() {
-        let mut last_error = None;
-        for _ in 0..3 {
+        let last_error;
+        {
             let temp = tempfile::TempDir::new().unwrap();
             let input = temp.path().join("in.png");
             let watermarked = temp.path().join("wm.png");
@@ -4949,7 +4589,12 @@ mod tests {
             })
             .save(&input)
             .unwrap();
-            let key = crate::keyfile::WatermarkKey::random(crate::keyfile::KeyMode::Independent);
+            let key = crate::keyfile::WatermarkKey {
+                mode: crate::keyfile::KeyMode::Independent,
+                salt: [19; 16],
+                derived_key: [71; 32],
+                iterations: 210_000,
+            };
             embed_image_file_with_auto_strength(
                 &input,
                 &watermarked,
@@ -4980,7 +4625,12 @@ mod tests {
                 attacked.width(),
                 attacked.height(),
                 &KeySource::KeyFile(key.to_key_file()),
-                &center_zoom_geometry_candidates(&[undo]),
+                &[GeometryCandidate {
+                    rotation_degrees: 0.0,
+                    scale: undo,
+                    layout: GeometryLayout::CenterZoom,
+                    score: 1.0,
+                }],
                 &mut attempted,
                 &mut credential_error,
                 "center-zoom",
@@ -4994,13 +4644,13 @@ mod tests {
                 other => last_error = Some(format!("{other:?} credential={credential_error:?}")),
             }
         }
-        panic!("known 1.5× photo-size inverse failed after retries: {last_error:?}");
+        panic!("known 1.5× photo-size inverse failed in its single attempt: {last_error:?}");
     }
 
     #[test]
     fn fill_crop_seven_degree_known_inverse_extracts() {
-        let mut last_error = None;
-        for _ in 0..3 {
+        let last_error;
+        {
             let temp = tempfile::TempDir::new().unwrap();
             let input = temp.path().join("in.png");
             let watermarked = temp.path().join("wm.png");
@@ -5016,7 +4666,12 @@ mod tests {
             })
             .save(&input)
             .unwrap();
-            let key = crate::keyfile::WatermarkKey::random(crate::keyfile::KeyMode::Independent);
+            let key = crate::keyfile::WatermarkKey {
+                mode: crate::keyfile::KeyMode::Independent,
+                salt: [19; 16],
+                derived_key: [71; 32],
+                iterations: 210_000,
+            };
             embed_image_file_with_auto_strength(
                 &input,
                 &watermarked,
@@ -5055,7 +4710,12 @@ mod tests {
                 )
                 .unwrap_or(Rgba([255, 255, 255, 255]))
             });
-            let forced = fill_crop_cover_undo_candidates(&attacked);
+            let forced = vec![GeometryCandidate {
+                rotation_degrees: -degrees,
+                scale: 1.0 / growth,
+                layout: GeometryLayout::FixedCanvasFit,
+                score: 1.0,
+            }];
             let mut attempted = Vec::new();
             let mut credential_error = None;
             let mut progress = 0_usize;
@@ -5079,12 +4739,16 @@ mod tests {
                 Err(error) => last_error = Some(error.to_string()),
             }
         }
-        panic!("forced fill-crop -7°+1.03 extract failed after retries: {last_error:?}");
+        panic!("forced fill-crop -7°+1.03 extract failed in its single attempt: {last_error:?}");
     }
 
     fn center_crop_canvas(source: &RgbaImage, keep: f32) -> RgbaImage {
-        let crop_w = ((source.width() as f32) * keep).round().clamp(1.0, source.width() as f32) as u32;
-        let crop_h = ((source.height() as f32) * keep).round().clamp(1.0, source.height() as f32) as u32;
+        let crop_w = ((source.width() as f32) * keep)
+            .round()
+            .clamp(1.0, source.width() as f32) as u32;
+        let crop_h = ((source.height() as f32) * keep)
+            .round()
+            .clamp(1.0, source.height() as f32) as u32;
         let x = (source.width() - crop_w) / 2;
         let y = (source.height() - crop_h) / 2;
         image::imageops::crop_imm(source, x, y, crop_w, crop_h).to_image()
@@ -5092,8 +4756,8 @@ mod tests {
 
     #[test]
     fn center_crop_identity_extracts_without_geometry() {
-        let mut last_error = None;
-        for _ in 0..8 {
+        let last_error;
+        {
             let temp = tempfile::TempDir::new().unwrap();
             let input = temp.path().join("in.png");
             let watermarked = temp.path().join("wm.png");
@@ -5109,7 +4773,12 @@ mod tests {
             })
             .save(&input)
             .unwrap();
-            let key = crate::keyfile::WatermarkKey::random(crate::keyfile::KeyMode::Independent);
+            let key = crate::keyfile::WatermarkKey {
+                mode: crate::keyfile::KeyMode::Independent,
+                salt: [19; 16],
+                derived_key: [71; 32],
+                iterations: 210_000,
+            };
             embed_image_file_with_auto_strength(
                 &input,
                 &watermarked,
@@ -5143,7 +4812,7 @@ mod tests {
                 Err(error) => last_error = Some(error),
             }
         }
-        panic!("identity center-crop extract failed after retries: {last_error:?}");
+        panic!("identity center-crop extract failed in its single attempt: {last_error:?}");
     }
 
     fn aspect_preserving_rotated_canvas(
@@ -5196,7 +4865,12 @@ mod tests {
         })
         .save(&input)
         .unwrap();
-        let key = crate::keyfile::WatermarkKey::random(crate::keyfile::KeyMode::Independent);
+        let key = crate::keyfile::WatermarkKey {
+            mode: crate::keyfile::KeyMode::Independent,
+            salt: [19; 16],
+            derived_key: [71; 32],
+            iterations: 210_000,
+        };
         embed_image_file_with_auto_strength(
             &input,
             &watermarked,
@@ -5273,7 +4947,12 @@ mod tests {
         })
         .save(&input)
         .unwrap();
-        let key = crate::keyfile::WatermarkKey::random(crate::keyfile::KeyMode::Independent);
+        let key = crate::keyfile::WatermarkKey {
+            mode: crate::keyfile::KeyMode::Independent,
+            salt: [19; 16],
+            derived_key: [71; 32],
+            iterations: 210_000,
+        };
         embed_image_file_with_auto_strength(
             &input,
             &watermarked,
@@ -5304,8 +4983,12 @@ mod tests {
         let attacked = RgbaImage::from_fn(out_w, out_h, |x, y| {
             let dx = x as f32 - out_cx;
             let dy = y as f32 - out_cy;
-            bilinear_like(&source, cos * dx + sin * dy + src_cx, -sin * dx + cos * dy + src_cy)
-                .unwrap_or(Rgba([255, 255, 255, 255]))
+            bilinear_like(
+                &source,
+                cos * dx + sin * dy + src_cx,
+                -sin * dx + cos * dy + src_cy,
+            )
+            .unwrap_or(Rgba([255, 255, 255, 255]))
         });
         assert!(
             sync::has_uniform_rotation_padding(&attacked),
@@ -5452,23 +5135,9 @@ mod tests {
             candidate.layout == GeometryLayout::AabbPadded
                 && (candidate.rotation_degrees - 20.0).abs() < 0.01
         }));
-        assert!(selected.iter().any(|candidate| {
-            candidate.layout == GeometryLayout::FixedCanvasFit
-        }));
-    }
-
-    #[test]
-    fn no_pad_hot_path_coverage_is_not_the_forced_five_to_eight_list() {
-        let bins = rotation_bin_centers();
-        assert!(bins.iter().any(|angle| angle.abs() > 8.0));
-        assert!(bins.iter().any(|angle| (*angle - 140.0).abs() < 0.01));
-        assert_ne!(
-            no_pad_fill_crop_forced_candidates(&RgbaImage::new(640, 480))
-                .iter()
-                .map(|candidate| candidate.rotation_degrees)
-                .collect::<Vec<_>>(),
-            bins
-        );
+        assert!(selected
+            .iter()
+            .any(|candidate| { candidate.layout == GeometryLayout::FixedCanvasFit }));
     }
 
     #[test]
@@ -5488,9 +5157,9 @@ mod tests {
         let start_y = (original_height - current_height) / 2;
         let expected_x = ((start_x + BLOCK_SIZE - 1) / BLOCK_SIZE) as i32;
         let expected_y = ((start_y + BLOCK_SIZE - 1) / BLOCK_SIZE) as i32;
-        assert!(origins.iter().any(|origin| {
-            origin.block_x == expected_x && origin.block_y == expected_y
-        }));
+        assert!(origins
+            .iter()
+            .any(|origin| { origin.block_x == expected_x && origin.block_y == expected_y }));
         assert!(origins[0].block_x != 0 || origins[0].block_y != 0);
     }
 
@@ -5502,27 +5171,22 @@ mod tests {
     }
 
     #[test]
-    fn enlarged_images_are_prioritized_before_orientation_fallbacks() {
-        let scales = priority_scale_parameters();
-        assert_eq!(&scales[..2], &[0.5, 0.25]);
-        assert_eq!(&scales[2..7], &[2.0, 1.5, 1.25, 3.0, 4.0]);
-        assert_eq!(orientation_angle_parameters(), vec![90.0, -90.0, 180.0]);
-    }
-
-    #[test]
     fn coarse_scale_grid_uses_four_percent_steps() {
         let scales = coarse_scale_parameters();
         let mut expected = 0.25_f32;
         while expected <= 0.30 {
             assert!(
-                scales.iter().any(|scale| (*scale - expected).abs() < 0.0005),
+                scales
+                    .iter()
+                    .any(|scale| (*scale - expected).abs() < 0.0005),
                 "missing coarse scale {expected}"
             );
             expected *= 1.04;
         }
         assert!(
-            !scales.windows(2).any(|pair| (pair[1] / pair[0] - 1.1).abs() < 0.001
-                && pair[0] < 0.4),
+            !scales
+                .windows(2)
+                .any(|pair| (pair[1] / pair[0] - 1.1).abs() < 0.001 && pair[0] < 0.4),
             "coarse grid should no longer use 10% steps in the downscale range"
         );
     }
@@ -5588,15 +5252,20 @@ mod tests {
 
     #[test]
     fn robust_header_layout_matches_declared_size() {
-        assert_eq!(RobustHeader {
-            salt: [0; 16],
-            body_len: 32,
-            original_width: 640,
-            original_height: 480,
-            strength_x10: 120,
-            flags: 0,
-            qim_profile: dwt_qim::QIM_PROFILE_PYRAMID,
-        }.to_bytes().len(), crate::payload::ROBUST_HEADER_LEN);
+        assert_eq!(
+            RobustHeader {
+                salt: [0; 16],
+                body_len: 32,
+                original_width: 640,
+                original_height: 480,
+                strength_x10: 120,
+                flags: 0,
+                qim_profile: dwt_qim::QIM_PROFILE_PYRAMID,
+            }
+            .to_bytes()
+            .len(),
+            crate::payload::ROBUST_HEADER_LEN
+        );
     }
 
     #[test]
@@ -5625,73 +5294,22 @@ mod tests {
     }
 
     #[test]
-    fn no_pad_fill_crop_search_includes_seven_degree_cover_undo() {
-        let angles = no_pad_fill_crop_angle_parameters();
-        assert!(angles.iter().any(|angle| (*angle - 7.0).abs() < 0.01));
-        assert!(angles.iter().any(|angle| (*angle + 7.0).abs() < 0.01));
-        let scales = fixed_canvas_correction_scales(640, 480, 7.0);
-        let growth = rotation_canvas_growth(640, 480, 7.0);
-        let undo = 1.0 / (growth * 1.03);
-        assert!(
-            scales.iter().any(|scale| (*scale - undo).abs() < 0.01),
-            "expected undo {undo} in {scales:?}"
-        );
-        assert_eq!(
-            no_pad_fill_crop_seven_degree_candidates(&RgbaImage::new(640, 480)).len(),
-            6
-        );
-    }
-
-    #[test]
-    fn center_zoom_undo_grid_covers_editor_factors() {
-        let grid = center_zoom_undo_grid();
-        assert!(grid.first().is_some_and(|scale| (*scale - 0.50).abs() < 0.001));
-        assert!(grid.last().is_some_and(|scale| (*scale - 0.98).abs() < 0.001));
-        for factor in [1.10_f32, 1.25, 1.50, 2.00] {
-            let undo = 1.0 / factor;
-            assert!(
-                grid.iter().any(|scale| (*scale - undo).abs() < 0.02),
-                "grid missing undo {undo} for zoom {factor}"
-            );
-        }
-        let blank = RgbaImage::from_pixel(64, 64, Rgba([128, 128, 128, 255]));
-        let seeds = period_aligned_center_zoom_undos(&blank);
-        assert!(seeds.iter().any(|scale| (*scale - 1.0 / 1.1).abs() < 0.01));
-        assert!(seeds.iter().any(|scale| (*scale - 1.0 / 1.5).abs() < 0.01));
-        assert!(seeds.iter().any(|scale| (*scale - 0.5).abs() < 0.01));
-    }
-
-    #[test]
-    fn fill_crop_cover_undo_includes_one_and_two_degrees() {
-        let forced = fill_crop_cover_undo_candidates(&RgbaImage::new(640, 480));
-        for angle in [-7.0_f32, 7.0, -2.3, 2.3, -2.0, 2.0, -1.0, 1.0] {
-            assert!(
-                forced
-                    .iter()
-                    .any(|candidate| (candidate.rotation_degrees - angle).abs() < 0.01
-                        && candidate.layout == GeometryLayout::FixedCanvasFit),
-                "forced fill-crop missing {angle}°"
-            );
-        }
-    }
-
-    #[test]
     fn rotation_bin_parameters_always_try_fill_crop_and_aabb() {
         let source = RgbaImage::new(640, 480);
         for has_padding in [true, false] {
             let parameters = rotation_bin_parameters(&source, has_padding);
-            assert!(parameters.iter().any(|(_, _, layout)| {
-                *layout == GeometryLayout::FixedCanvasFit
-            }));
-            assert!(parameters.iter().any(|(_, _, layout)| {
-                *layout == GeometryLayout::AabbPadded
-            }));
-            assert!(parameters.iter().any(|(_, _, layout)| {
-                *layout == GeometryLayout::AabbHeightKept
-            }));
-            assert!(parameters.iter().any(|(_, _, layout)| {
-                *layout == GeometryLayout::AabbWidthKept
-            }));
+            assert!(parameters
+                .iter()
+                .any(|(_, _, layout)| { *layout == GeometryLayout::FixedCanvasFit }));
+            assert!(parameters
+                .iter()
+                .any(|(_, _, layout)| { *layout == GeometryLayout::AabbPadded }));
+            assert!(parameters
+                .iter()
+                .any(|(_, _, layout)| { *layout == GeometryLayout::AabbHeightKept }));
+            assert!(parameters
+                .iter()
+                .any(|(_, _, layout)| { *layout == GeometryLayout::AabbWidthKept }));
             assert_eq!(
                 has_padding,
                 parameters

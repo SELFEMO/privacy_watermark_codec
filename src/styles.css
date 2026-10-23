@@ -873,7 +873,11 @@ footer { display: flex; justify-content: flex-start; gap: 20px; flex: 0 0 auto; 
 }
 
 @media (max-height: 680px) {
-  .hero { display: none; }
+  /* 保留无边框窗口唯一的控制入口，只收起装饰内容。
+     Preserve the only controls in the frameless window and collapse decoration only. */
+  .hero { padding-block: 4px; flex-direction: row; align-items: center; }
+  .hero .hero-branding { display: none; }
+  .hero-side { width: 100%; flex-direction: row; justify-content: space-between; }
   .shell { height: calc(100vh - 18px); margin-top: 9px; margin-bottom: 9px; }
   footer { display: none; }
 }
@@ -1120,3 +1124,52 @@ footer { display: flex; justify-content: flex-start; gap: 20px; flex: 0 0 auto; 
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
+
+/* 语言样式不可覆盖窄窗口的单列布局，缩放后的逻辑视口同样适用。
+   Language styles must not override narrow-window columns, including zoomed logical viewports. */
+@media (max-width: 1100px) {
+  .lang-en .decode-grid, .lang-en .scan-grid { grid-template-columns: minmax(0, 1fr); }
+  /* 单列时让外层面板滚动并按内容分配行高，避免卡片被均分到只剩标题、表单却被裁掉。
+     In a single column, scroll the outer panel and size rows by content so equal shrinking cannot leave only headings while clipping forms. */
+  .panel-grid { grid-auto-rows: max-content; align-content: start; }
+  .panel-grid > .card { min-height: max-content; overflow: visible; }
+  .panel-grid .decode-results, .panel-grid .scan-results { flex: 0 0 auto; overflow: visible; }
+  .hero { flex-direction: row; align-items: center; }
+  .hero-branding h1 { font-size: 24px; }
+  .hero .subtitle, .hero .eyebrow, .hero .brand-mark { display: none; }
+  .hero-side { align-items: flex-end; }
+}
+.global-task-bar { flex: 0 0 auto; margin-bottom: 12px; border: 1px solid var(--border-soft); border-radius: 12px; padding: 10px 14px; background: var(--surface-1); }
+.global-task-heading { display: flex; gap: 14px; align-items: center; }
+.global-task-heading .secondary-button { margin-left: auto; padding: 4px 12px; width: auto; }
+.global-task-bar .progress-card { border: 0; margin: 4px 0 0; padding: 0; }
+.global-task-bar .progress-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 3px 0; }
+.global-task-bar .progress-fill { width: 100%; transform-origin: left; transition: transform 100ms linear; }
+.global-task-bar .progress-phase { margin: 4px 0; }
+.global-task-bar .progress-details { max-height: 64px; overflow: auto; }
+.global-task-bar .progress-details summary { font-size: 12px; color: var(--text-muted); }
+.result-pager { display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 10px 0; font-size: var(--font-xs); }
+.result-pager button { background: var(--surface-3); border: 1px solid var(--border-soft); border-radius: 6px; padding: 5px 9px; cursor: pointer; }
+.result-pager button:disabled { opacity: .4; cursor: default; }
+.imported-file-list { margin: 8px 0; padding: 0; list-style: none; max-height: 220px; overflow: auto; }
+.imported-file-list li { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+.imported-file-list li span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imported-file-list li button { background: transparent; border: 1px solid var(--border-soft); border-radius: 5px; cursor: pointer; }
+.advanced-settings { margin-block: 12px; }
+.advanced-settings summary, .imported-files summary, .result-details summary { cursor: pointer; color: var(--text-muted); font-size: var(--font-sm); }
+.advanced-settings .field { margin-top: 12px; }
+.recovery-hint { margin: 0 0 10px; font-size: var(--font-xs); color: var(--text-muted); }
+.result-details { margin-top: 10px; overflow-wrap: anywhere; }
+.result-details small { display: block; margin-block: 5px; }
+.scan-status.failed { background: var(--danger-bg); color: #ffc0c7; }
+@media (max-height: 680px) { .global-task-bar { padding: 6px 12px; margin-bottom: 6px; } .global-task-bar .progress-meta, .global-task-bar .progress-details { display: none; } }
+
+@media (max-width: 700px) {
+  .tabs { padding: 4px; gap: 3px; }
+  .lang-en .tabs button, .tabs button { padding: 8px 6px; font-size: 13px; overflow-wrap: normal; word-break: normal; }
+  .global-task-bar .progress-top { display: none; }
+  .global-task-bar .progress-phase { margin: 2px 0; }
+  .recovery-hint { display: none; }
+}
+
+.global-task-bar .progress-card.completed .progress-fill, .global-task-bar .progress-card.completed_with_errors .progress-fill { transition: none; }
