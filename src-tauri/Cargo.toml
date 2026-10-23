@@ -1,6 +1,6 @@
 [package]
 name = "privacy-watermark-codec"
-version = "0.2.12"
+version = "0.3.1"
 description = "Cross-platform invisible privacy watermark encoder and decoder"
 authors = ["Privacy Watermark Codec Contributors"]
 edition = "2021"

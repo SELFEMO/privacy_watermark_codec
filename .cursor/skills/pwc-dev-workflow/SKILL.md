@@ -12,14 +12,20 @@ description: >-
 ## Run
 
 ```
-npm run clean; npm install --registry=https://registry.npmmirror.com; npm run desktop:dev
+npm run desktop:dev:clean
 ```
 
 ## Build
 
 ```
-npm run clean; npm install --registry=https://registry.npmmirror.com; npm run desktop:build
+npm run desktop:build:clean
 ```
+
+Both entry points support Windows CMD, Windows PowerShell, and PowerShell without command separators. If PowerShell's execution policy blocks `npm.ps1`, use `npm.cmd run desktop:build:clean` or `npm.cmd run desktop:dev:clean`; changing the system execution policy is unnecessary. They run full `clean`, install dependencies with `--registry=https://registry.npmmirror.com`, and then call the existing desktop entry point in order. Any failure stops the remaining steps and preserves the failed step's exit code.
+
+Full cleanup removes frontend `dist`/Vite caches, Cargo `target` directories, Tauri temporary directories, and `release`; it preserves `node_modules` and bundled FFmpeg assets. The existing `desktop:dev` and `desktop:build` entry points still preserve incremental caches.
+
+Use `npm run desktop:build:clean -- --dry-run` or `npm run desktop:dev:clean -- --dry-run` to preview without cleaning, installing, or launching. Build arguments are forwarded to the existing build entry point, for example `npm run desktop:build:clean -- --arch x64`. The workflow consumes its own `--dry-run` option; an additional `--` passed to the workflow marks the start of arguments to forward verbatim.
 
 ## When to launch
 

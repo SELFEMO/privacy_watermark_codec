@@ -1,6 +1,6 @@
 {
   "name": "privacy-watermark-codec",
-  "version": "0.2.12",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,7 +13,9 @@
     "preview": "vite preview",
     "tauri": "node scripts/tauri-cli.mjs",
     "desktop:dev": "node scripts/tauri-dev.mjs",
+    "desktop:dev:clean": "node scripts/desktop-workflow.mjs dev",
     "desktop:build": "node scripts/build-release.mjs",
+    "desktop:build:clean": "node scripts/desktop-workflow.mjs build",
     "desktop:build:windows": "node scripts/build-release.mjs nsis",
     "desktop:build:macos": "node scripts/build-release.mjs app",
     "desktop:build:linux": "node scripts/build-release.mjs appimage,deb,rpm",
@@ -84,6 +86,7 @@
     "linux:appimage:prefetch:x64": "node scripts/appimage-prefetch.mjs --target x86_64-unknown-linux-gnu",
     "linux:appimage:prefetch:arm64": "node scripts/appimage-prefetch.mjs --target aarch64-unknown-linux-gnu",
     "test:frontend": "node --test scripts/frontend-state.test.mjs",
+    "test:workflow": "node --test scripts/desktop-workflow.test.mjs",
     "test:ui": "node scripts/ui-check.mjs"
   },
   "dependencies": {

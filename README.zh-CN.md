@@ -150,7 +150,26 @@ npm run clean:release
 
 默认清理范围包括前端 `dist`/Vite 缓存、Cargo `target` 目录、Tauri 临时目录以及 `release` 安装包目录。清理过程不会删除 `node_modules`，也不会删除 `src-tauri/vendor/ffmpeg` 中的内置媒体工具。
 
-开发、前端构建和 Tauri 构建保留 Cargo 与前端增量缓存，不会自动全量清理。发布脚本只整理待交付目录；需要重新开始构建时显式执行上述清理命令。`cargo build` 和 `cargo test` 无须先清理。
+现有 `desktop:dev`、`desktop:build` 命令、前端构建和 Tauri 构建保留 Cargo 与前端增量缓存，不会自动全量清理。发布脚本只整理待交付目录；需要重新开始构建时显式执行上述清理命令。`cargo build` 和 `cargo test` 无须先清理。
+
+需要完整清理后重新构建时，在 Windows CMD、Windows PowerShell 或 PowerShell 中统一执行：
+
+```Shell
+npm run desktop:build:clean
+```
+
+需要完整清理后启动开发模式时，使用 `npm run desktop:dev:clean`。两个命令都依次执行 `npm run clean`、`npm install --registry=https://registry.npmmirror.com`，然后执行现有桌面构建或开发入口，清理范围与上述说明一致。任一步骤失败就立即停止，并保留该步骤的退出码，避免前序失败后继续安装或构建。工作流直接向 npm CLI 传递参数，不依赖终端分隔符；在 CMD 中，包含分号的命令字符串可能让 npm 收到 `clean;` 这样的字面脚本名。
+
+如果 PowerShell 的执行策略阻止 `npm.ps1`，改用 `npm.cmd run desktop:build:clean` 或 `npm.cmd run desktop:dev:clean`，无需修改系统执行策略。
+
+可以先预览步骤，预览不会执行清理、安装或桌面命令；也可以将构建选项传递给现有构建入口：
+
+```Shell
+npm run desktop:build:clean -- --dry-run
+npm run desktop:build:clean -- --arch x64
+```
+
+`desktop:dev:clean` 同样支持 `--dry-run`。npm 的 `--` 之后的构建参数会透传给现有构建入口，工作流会消费自身的 `--dry-run` 选项。如果向工作流传入额外的 `--` 分隔符，其后的参数会原样透传。
 
 ## 开发运行
 
@@ -413,6 +432,7 @@ npm run linux:desktop:cleanup
 ```Shell
 cargo test --workspace --offline -- --test-threads=2
 npm run test:frontend
+npm run test:workflow
 npm run build
 cargo build --workspace --offline
 ```

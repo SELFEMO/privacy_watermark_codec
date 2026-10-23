@@ -150,7 +150,26 @@ npm run clean:release
 
 The default cleanup removes frontend `dist`/Vite caches, Cargo `target` directories, Tauri temporary directories, and the `release` package directory. It preserves `node_modules` and the bundled media tools under `src-tauri/vendor/ffmpeg`.
 
-Development, frontend builds, and Tauri builds preserve incremental caches instead of cleaning Cargo before every compilation. Release scripts only prepare distribution output. Use the explicit clean commands above when needed; `cargo build` and `cargo test` do not require a clean first.
+The existing `desktop:dev` and `desktop:build` commands, frontend builds, and Tauri builds preserve incremental caches instead of cleaning Cargo before every compilation. Release scripts only prepare distribution output. Use the explicit clean commands above when needed; `cargo build` and `cargo test` do not require a clean first.
+
+For a complete clean build, use this single command in Windows CMD, Windows PowerShell, or PowerShell:
+
+```Shell
+npm run desktop:build:clean
+```
+
+For a complete clean followed by development startup, use `npm run desktop:dev:clean`. Both commands run `npm run clean`, then `npm install --registry=https://registry.npmmirror.com`, then the existing desktop build or development entry point. The cleanup scope is the same as described above. Any failed step stops the workflow immediately and preserves its exit code, so installation or build does not continue after an earlier failure. The workflow passes arguments directly to the npm CLI without shell separators; a command string containing semicolons can otherwise reach npm as a literal script name such as `clean;` in CMD.
+
+If PowerShell's execution policy blocks `npm.ps1`, use `npm.cmd run desktop:build:clean` or `npm.cmd run desktop:dev:clean`; changing the system execution policy is unnecessary.
+
+Preview the steps without cleaning, installing, or starting the desktop command, or pass build options to the existing build entry point:
+
+```Shell
+npm run desktop:build:clean -- --dry-run
+npm run desktop:build:clean -- --arch x64
+```
+
+`--dry-run` is also available for `desktop:dev:clean`. Build arguments after npm's `--` are forwarded to the existing build entry point; the workflow consumes its own `--dry-run` option. An additional `--` passed to the workflow marks the start of arguments to forward verbatim.
 
 ## Development
 
@@ -413,6 +432,7 @@ If a system package was installed, refresh desktop caches or log out and back in
 ```Shell
 cargo test --workspace --offline -- --test-threads=2
 npm run test:frontend
+npm run test:workflow
 npm run build
 cargo build --workspace --offline
 ```

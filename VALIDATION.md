@@ -208,3 +208,42 @@ npm run test:ui
 - [validation/real-samples.json](validation/real-samples.json)
 - [validation/ui-en-zoom.png](validation/ui-en-zoom.png)
 - [validation/ui-zh.png](validation/ui-zh.png)
+
+
+## Windows 构建入口验证（2026-10-23）
+
+本节记录本次 Windows 构建修复，应用发布元数据统一为 0.2.13。前述 macOS、算法与媒体样本记录作为历史验证保留，不视为本轮重新执行。
+
+原始 npm 日志的参数包含字面量 clean;，镜像地址也带尾随分号。错误发生在 npm 查找脚本时，尚未执行现有清理逻辑。新增 desktop:build:clean 和 desktop:dev:clean，通过 Node 直接启动 npm_execpath 指向的 npm CLI，按参数数组依次执行完整清理、npmmirror 安装和原有桌面入口；前一步失败即停止并保留退出码。预览模式不执行这些步骤，额外分隔符之后的参数归目标命令所有。
+
+本机环境：Windows x64（系统内核 10.0.26300）、Node 22.18.0、npm 11.21.1、Cargo 1.96.1，使用本机 MSVC 工具链。实际检查结果：
+
+- npm run test:workflow：12 项通过。覆盖开发/构建顺序、三阶段失败停止与退出码、中文及空格路径、特殊字符参数、环境继承、缺失或无效 npm CLI、预览无副作用、真实子进程启动错误，以及 SIGINT / SIGTERM 处理与后代进程退出。信号用隔离父进程触发同一处理器验证，不宣称手动进行控制台按键验收。
+- npm run test:frontend：2 项通过，保留乱序事件、重试槽位与过期任务检查。
+- npm run build：在完整流程内通过 Vue/TypeScript 检查与 Vite 生产构建。
+- CMD 和 PowerShell 的 npm run desktop:build:clean -- --dry-run：通过。Windows PowerShell 的本机执行策略阻止 npm.ps1，使用 npm.cmd run desktop:build:clean -- --dry-run 通过；未修改系统执行策略。
+- cargo metadata --offline --locked --no-deps --format-version 1：通过，两个工作区包均为目标应用版本。
+- npm run desktop:build:clean：最终完整执行成功，退出码为 0；确实执行了全量清理、镜像安装、前端构建、Rust 原生编译、NSIS 打包和规范命名产物复制。Rust release 编译输出记录为 2 分 09 秒，此数值不包含安装、前端构建和 NSIS 打包耗时。
+- 六个清单/锁文件中的八处自有版本值一致；npm 第三方锁定条目、依赖声明，以及 Cargo 锁文件中的第三方包内容均无变化。
+- 构建结束后 Tauri 配置逐字节核对通过，仅保留批准的应用版本更新。FFmpeg 二进制路径及哈希未变；生成清单中的平台信息保留在构建输出，源码清单已恢复到构建前内容。
+
+首次受限环境构建在访问 crates.io 时失败，本地离线缓存缺少 rustfft。补齐 Cargo.lock 锁定的依赖并允许必要打包工具下载后，从完整清理入口重新执行成功。没有以网络失败代替构建通过，也没有调整依赖版本来规避问题。
+
+产物为 [Windows x64 NSIS 安装包](release/privacy-watermark-codec-windows-x64.exe)，文件大小 169,479,760 字节，SHA-256：37A9BD873C2A55AD64F0DD1B8E0B0460AFA25D864024E37FD1335C74A54EA103。原生程序及安装包的 ProductVersion 和 FileVersion 均实测为目标应用版本。规范命名产物位于被 Git 忽略的 release 目录，链接指向本地文件，不表示已上传发布。
+
+本轮验收覆盖编译和打包，没有安装或启动应用，也没有重新执行此前媒体样本、全平台原生界面或算法攻击回归。
+
+完整修改文件均已写入原路径，可直接打开并覆盖使用：
+
+- [npm 清单](package.json)
+- [npm 锁文件](package-lock.json)
+- [Cargo 锁文件](Cargo.lock)
+- [桌面包清单](src-tauri/Cargo.toml)
+- [核心库清单](crates/watermark-core/Cargo.toml)
+- [Tauri 配置](src-tauri/tauri.conf.json)
+- [统一桌面工作流完整源码](scripts/desktop-workflow.mjs)
+- [工作流回归测试完整源码](scripts/desktop-workflow.test.mjs)
+- [英文说明](README.md)
+- [中文说明](README.zh-CN.md)
+- [开发工作流技能](.cursor/skills/pwc-dev-workflow/SKILL.md)
+- [本验证记录](VALIDATION.md)
